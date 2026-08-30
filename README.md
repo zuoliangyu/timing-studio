@@ -4,13 +4,15 @@ Timing Studio 是一个运行在浏览器中的数字时序图编辑器。Rust �
 
 ## 当前功能
 
-- YAML 描述高低电平、时钟和总线
+- 简洁 DSL 或 YAML/JSON 描述高低电平、时钟和总线
 - 实时 SVG 预览
 - 时间标记和信号分组
 - 浅色、深色主题
 - 40%～200% 波形预览缩放与适应窗口
 - 导入 YAML/JSON，导出 SVG 和 2 倍分辨率 PNG
 - 浏览器本地保存最近一次编辑
+- 时间顺序、区间重叠和非有限数值校验
+- 错误行高亮与点击跳转
 - PWA 离线缓存和 GitHub Pages 发布
 
 ## 本地开发
@@ -27,6 +29,19 @@ npm run dev
 开发服务器默认运行在 `http://localhost:1420`。
 
 ## 输入示例
+
+人工编写推荐使用简洁 DSL：
+
+```text
+title "SPI Flash 读取"
+unit cycle
+clock SCLK period 2 cycles 8 start 1 group SPI
+signal CS_N high@0 low@1 high@17 group SPI
+bus DATA "0x9F"@1..9 "ADDR"@9..17 group SPI
+mark "采样" @9
+```
+
+程序生成或需要结构化交换时可继续使用 YAML：
 
 ```yaml
 title: SPI Flash 读取

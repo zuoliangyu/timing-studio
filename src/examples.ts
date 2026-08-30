@@ -1,4 +1,12 @@
 export const examples = {
+  "简洁 DSL": `title "SPI Flash 读取"
+unit cycle
+clock SCLK period 2 cycles 8 start 1 group SPI
+signal CS_N high@0 low@1 high@17 group SPI
+bus MOSI "0x9F"@1..9 "ADDR"@9..17 group SPI
+bus MISO Z@1..9 "0xEF"@9..17 group SPI
+mark "采样" @9
+`,
   "SPI 读取": `title: SPI Flash 读取
 unit: cycle
 signals:
@@ -58,4 +66,3 @@ markers:
   - { at: 4, label: "传输" }
 `,
 };
-

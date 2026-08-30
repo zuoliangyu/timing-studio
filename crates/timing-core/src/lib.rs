@@ -28,9 +28,18 @@ pub struct Signal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SignalKind {
-    Clock { period: f64, cycles: u32, #[serde(default)] start: f64 },
-    Digital { points: Vec<DigitalPoint> },
-    Bus { segments: Vec<BusSegment> },
+    Clock {
+        period: f64,
+        cycles: u32,
+        #[serde(default)]
+        start: f64,
+    },
+    Digital {
+        points: Vec<DigitalPoint>,
+    },
+    Bus {
+        segments: Vec<BusSegment>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,8 +82,10 @@ pub struct RenderOptions {
 pub enum TimingError {
     #[error("无法解析输入：{0}")]
     Parse(String),
-    #[error("第 {line} 行信号无效：{message}")]
+    #[error("第 {line} 个信号无效：{message}")]
     InvalidSignal { line: usize, message: String },
+    #[error("时序图无效：{0}")]
+    Invalid(String),
     #[error("时序图至少需要一个信号")]
     Empty,
 }
@@ -84,10 +95,230 @@ fn default_unit() -> String {
 }
 
 pub fn parse(source: &str) -> Result<Diagram, TimingError> {
-    let diagram = serde_yaml::from_str::<Diagram>(source)
-        .map_err(|error| TimingError::Parse(error.to_string()))?;
+    let diagram = if is_dsl(source) {
+        parse_dsl(source)?
+    } else {
+        serde_yaml::from_str::<Diagram>(source)
+            .map_err(|error| TimingError::Parse(error.to_string()))?
+    };
     validate(&diagram)?;
     Ok(diagram)
+}
+
+fn is_dsl(source: &str) -> bool {
+    source
+        .lines()
+        .find_map(|line| {
+            let keyword = line.trim().split_whitespace().next()?;
+            (!keyword.starts_with('#')).then_some(matches!(
+                keyword,
+                "title" | "unit" | "clock" | "signal" | "bus" | "mark"
+            ))
+        })
+        .unwrap_or(false)
+}
+
+fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
+    let mut diagram = Diagram {
+        title: None,
+        unit: default_unit(),
+        signals: Vec::new(),
+        markers: Vec::new(),
+    };
+
+    for (index, raw_line) in source.lines().enumerate() {
+        let line_number = index + 1;
+        let tokens = tokenize(raw_line).map_err(|message| dsl_error(line_number, &message))?;
+        if tokens.is_empty() {
+            continue;
+        }
+
+        match tokens[0].as_str() {
+            "title" => diagram.title = Some(required(&tokens, 1, line_number, "标题")?.to_owned()),
+            "unit" => diagram.unit = required(&tokens, 1, line_number, "时间单位")?.to_owned(),
+            "clock" => diagram.signals.push(parse_clock(&tokens, line_number)?),
+            "signal" => diagram.signals.push(parse_digital(&tokens, line_number)?),
+            "bus" => diagram.signals.push(parse_bus(&tokens, line_number)?),
+            "mark" => diagram.markers.push(parse_marker(&tokens, line_number)?),
+            keyword => return Err(dsl_error(line_number, &format!("未知语句 `{keyword}`"))),
+        }
+    }
+    Ok(diagram)
+}
+
+fn tokenize(line: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+
+    for ch in line.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            '#' if !quoted => break,
+            ch if ch.is_whitespace() && !quoted => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            _ => token.push(ch),
+        }
+    }
+    if quoted {
+        return Err("引号未闭合".into());
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
+
+fn parse_clock(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
+    let name = required(tokens, 1, line, "时钟名称")?.to_owned();
+    let period = option_number(tokens, "period", line)?.unwrap_or(2.0);
+    let cycles = option_number(tokens, "cycles", line)?.unwrap_or(1.0);
+    if cycles.fract() != 0.0 || cycles < 0.0 || cycles > u32::MAX as f64 {
+        return Err(dsl_error(line, "cycles 必须是正整数"));
+    }
+    Ok(Signal {
+        name,
+        group: option_text(tokens, "group").map(str::to_owned),
+        kind: SignalKind::Clock {
+            period,
+            cycles: cycles as u32,
+            start: option_number(tokens, "start", line)?.unwrap_or(0.0),
+        },
+    })
+}
+
+fn parse_digital(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
+    let name = required(tokens, 1, line, "信号名称")?.to_owned();
+    let end = tokens
+        .iter()
+        .position(|token| token == "group")
+        .unwrap_or(tokens.len());
+    let points = tokens[2..end]
+        .iter()
+        .map(|token| {
+            let (value, at) = token
+                .split_once('@')
+                .ok_or_else(|| dsl_error(line, "数字采样点应写成 high@0"))?;
+            let value = match value.to_ascii_lowercase().as_str() {
+                "0" | "low" => LogicValue::Low,
+                "1" | "high" => LogicValue::High,
+                "x" => LogicValue::X,
+                "z" => LogicValue::Z,
+                _ => return Err(dsl_error(line, &format!("未知逻辑值 `{value}`"))),
+            };
+            Ok(DigitalPoint {
+                at: parse_number(at, line, "时间")?,
+                value,
+            })
+        })
+        .collect::<Result<Vec<_>, TimingError>>()?;
+    if points
+        .iter()
+        .any(|point| !point.at.is_finite() || point.at < 0.0)
+    {
+        return Err(dsl_error(line, "数字信号时间必须是有限的非负数"));
+    }
+    if points.windows(2).any(|pair| pair[0].at >= pair[1].at) {
+        return Err(dsl_error(line, "数字信号时间必须严格递增"));
+    }
+    Ok(Signal {
+        name,
+        group: option_text(tokens, "group").map(str::to_owned),
+        kind: SignalKind::Digital { points },
+    })
+}
+
+fn parse_bus(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
+    let name = required(tokens, 1, line, "总线名称")?.to_owned();
+    let end = tokens
+        .iter()
+        .position(|token| token == "group")
+        .unwrap_or(tokens.len());
+    let segments = tokens[2..end]
+        .iter()
+        .map(|token| {
+            let (value, range) = token
+                .rsplit_once('@')
+                .ok_or_else(|| dsl_error(line, "总线片段应写成 value@0..4"))?;
+            let (from, to) = range
+                .split_once("..")
+                .ok_or_else(|| dsl_error(line, "总线时间范围应写成 0..4"))?;
+            Ok(BusSegment {
+                from: parse_number(from, line, "起始时间")?,
+                to: parse_number(to, line, "结束时间")?,
+                value: value.to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, TimingError>>()?;
+    if segments.iter().any(|segment| {
+        !segment.from.is_finite()
+            || !segment.to.is_finite()
+            || segment.from < 0.0
+            || segment.to < 0.0
+    }) {
+        return Err(dsl_error(line, "总线时间必须是有限的非负数"));
+    }
+    if segments.iter().any(|segment| segment.to <= segment.from) {
+        return Err(dsl_error(line, "总线结束时间必须大于开始时间"));
+    }
+    if segments.windows(2).any(|pair| pair[1].from < pair[0].to) {
+        return Err(dsl_error(line, "总线片段不能重叠，且必须按时间排列"));
+    }
+    Ok(Signal {
+        name,
+        group: option_text(tokens, "group").map(str::to_owned),
+        kind: SignalKind::Bus { segments },
+    })
+}
+
+fn parse_marker(tokens: &[String], line: usize) -> Result<Marker, TimingError> {
+    let label = required(tokens, 1, line, "标记名称")?.to_owned();
+    let at = required(tokens, 2, line, "标记时间")?
+        .strip_prefix('@')
+        .ok_or_else(|| dsl_error(line, "标记时间应写成 @9"))?;
+    Ok(Marker {
+        at: parse_number(at, line, "标记时间")?,
+        label: Some(label),
+    })
+}
+
+fn required<'a>(
+    tokens: &'a [String],
+    index: usize,
+    line: usize,
+    name: &str,
+) -> Result<&'a str, TimingError> {
+    tokens
+        .get(index)
+        .map(String::as_str)
+        .ok_or_else(|| dsl_error(line, &format!("缺少{name}")))
+}
+
+fn option_text<'a>(tokens: &'a [String], key: &str) -> Option<&'a str> {
+    tokens
+        .iter()
+        .position(|token| token == key)
+        .and_then(|index| tokens.get(index + 1))
+        .map(String::as_str)
+}
+
+fn option_number(tokens: &[String], key: &str, line: usize) -> Result<Option<f64>, TimingError> {
+    option_text(tokens, key)
+        .map(|value| parse_number(value, line, key))
+        .transpose()
+}
+
+fn parse_number(value: &str, line: usize, name: &str) -> Result<f64, TimingError> {
+    value
+        .parse::<f64>()
+        .map_err(|_| dsl_error(line, &format!("{name} `{value}` 不是有效数字")))
+}
+
+fn dsl_error(line: usize, message: &str) -> TimingError {
+    TimingError::Parse(format!("第 {line} 行：{message}"))
 }
 
 fn validate(diagram: &Diagram) -> Result<(), TimingError> {
@@ -97,27 +328,78 @@ fn validate(diagram: &Diagram) -> Result<(), TimingError> {
 
     for (line, signal) in diagram.signals.iter().enumerate() {
         if signal.name.trim().is_empty() {
-            return Err(TimingError::InvalidSignal { line: line + 1, message: "名称不能为空".into() });
+            return Err(TimingError::InvalidSignal {
+                line: line + 1,
+                message: "名称不能为空".into(),
+            });
         }
+        let invalid = |message: &str| TimingError::InvalidSignal {
+            line: line + 1,
+            message: message.into(),
+        };
         match &signal.kind {
-            SignalKind::Clock { period, cycles, .. } if *period <= 0.0 || *cycles == 0 => {
-                return Err(TimingError::InvalidSignal { line: line + 1, message: "时钟周期和循环数必须大于 0".into() });
+            SignalKind::Clock {
+                period,
+                cycles,
+                start,
+            } => {
+                if !period.is_finite() || *period <= 0.0 || *cycles == 0 {
+                    return Err(invalid("时钟周期和循环数必须是有限的正数"));
+                }
+                if !start.is_finite() || *start < 0.0 {
+                    return Err(invalid("时钟开始时间必须是有限的非负数"));
+                }
             }
-            SignalKind::Digital { points } if points.is_empty() => {
-                return Err(TimingError::InvalidSignal { line: line + 1, message: "数字信号至少需要一个采样点".into() });
+            SignalKind::Digital { points } => {
+                if points.is_empty() {
+                    return Err(invalid("数字信号至少需要一个采样点"));
+                }
+                if points
+                    .iter()
+                    .any(|point| !point.at.is_finite() || point.at < 0.0)
+                {
+                    return Err(invalid("数字信号时间必须是有限的非负数"));
+                }
+                if points.windows(2).any(|pair| pair[0].at >= pair[1].at) {
+                    return Err(invalid("数字信号时间必须严格递增"));
+                }
             }
-            SignalKind::Bus { segments } if segments.iter().any(|item| item.to <= item.from) => {
-                return Err(TimingError::InvalidSignal { line: line + 1, message: "总线片段的 to 必须大于 from".into() });
+            SignalKind::Bus { segments } => {
+                if segments.is_empty() {
+                    return Err(invalid("总线至少需要一个片段"));
+                }
+                if segments.iter().any(|item| {
+                    !item.from.is_finite()
+                        || !item.to.is_finite()
+                        || item.from < 0.0
+                        || item.to <= item.from
+                }) {
+                    return Err(invalid("总线时间必须有限、非负，且 to 必须大于 from"));
+                }
+                if segments.windows(2).any(|pair| pair[1].from < pair[0].to) {
+                    return Err(invalid("总线片段不能重叠，且必须按时间排列"));
+                }
             }
-            _ => {}
         }
+    }
+    if diagram
+        .markers
+        .iter()
+        .any(|marker| !marker.at.is_finite() || marker.at < 0.0)
+    {
+        return Err(TimingError::Invalid("标记时间必须是有限的非负数".into()));
     }
     Ok(())
 }
 
 pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, TimingError> {
     validate(diagram)?;
-    let max_time = diagram.signals.iter().map(signal_end).chain(diagram.markers.iter().map(|m| m.at)).fold(1.0, f64::max);
+    let max_time = diagram
+        .signals
+        .iter()
+        .map(signal_end)
+        .chain(diagram.markers.iter().map(|m| m.at))
+        .fold(1.0, f64::max);
     let label_width = 154.0;
     let chart_width = 920.0;
     let row_height = 64.0;
@@ -127,9 +409,13 @@ pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, 
     let height = top + diagram.signals.len() as f64 * row_height + bottom;
     let x = |time: f64| label_width + (time / max_time) * chart_width;
     let (bg, panel, grid, text, muted, signal, bus, marker) = if options.dark {
-        ("#101517", "#151c1f", "#314044", "#e9f1f2", "#849397", "#52d6c9", "#81aef4", "#f0b65b")
+        (
+            "#101517", "#151c1f", "#314044", "#e9f1f2", "#849397", "#52d6c9", "#81aef4", "#f0b65b",
+        )
     } else {
-        ("#f1f3f2", "#ffffff", "#d5dcda", "#172124", "#667477", "#087f78", "#326fbe", "#b66714")
+        (
+            "#f1f3f2", "#ffffff", "#d5dcda", "#172124", "#667477", "#087f78", "#326fbe", "#b66714",
+        )
     };
 
     let mut svg = String::new();
@@ -158,7 +444,11 @@ pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, 
             write!(svg, r#"<text x="34" y="{:.2}" fill="{muted}" font-family="system-ui,sans-serif" font-size="10">{}</text>"#, y + 16.0, escape(group)).unwrap();
         }
         match &item.kind {
-            SignalKind::Clock { period, cycles, start } => {
+            SignalKind::Clock {
+                period,
+                cycles,
+                start,
+            } => {
                 let half = period / 2.0;
                 let mut path = format!("M {:.2} {:.2}", x(*start), y + 43.0);
                 for step in 0..(*cycles * 2) {
@@ -168,7 +458,9 @@ pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, 
                 }
                 write!(svg, r#"<path d="{path}" fill="none" stroke="{signal}" stroke-width="2.2" stroke-linejoin="round"/>"#).unwrap();
             }
-            SignalKind::Digital { points } => render_digital(&mut svg, points, y, &x, signal, muted),
+            SignalKind::Digital { points } => {
+                render_digital(&mut svg, points, y, &x, signal, muted)
+            }
             SignalKind::Bus { segments } => render_bus(&mut svg, segments, y, &x, bus, panel, text),
         }
     }
@@ -187,27 +479,57 @@ pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, 
 
 fn signal_end(signal: &Signal) -> f64 {
     match &signal.kind {
-        SignalKind::Clock { period, cycles, start } => start + period * *cycles as f64,
+        SignalKind::Clock {
+            period,
+            cycles,
+            start,
+        } => start + period * *cycles as f64,
         SignalKind::Digital { points } => points.last().map(|p| p.at).unwrap_or(1.0),
         SignalKind::Bus { segments } => segments.iter().map(|s| s.to).fold(1.0, f64::max),
     }
 }
 
-fn render_digital(svg: &mut String, points: &[DigitalPoint], y: f64, x: &impl Fn(f64) -> f64, signal: &str, muted: &str) {
-    let level = |value| match value { LogicValue::High => y + 19.0, LogicValue::Low => y + 43.0, LogicValue::X | LogicValue::Z => y + 31.0 };
+fn render_digital(
+    svg: &mut String,
+    points: &[DigitalPoint],
+    y: f64,
+    x: &impl Fn(f64) -> f64,
+    signal: &str,
+    muted: &str,
+) {
+    let level = |value| match value {
+        LogicValue::High => y + 19.0,
+        LogicValue::Low => y + 43.0,
+        LogicValue::X | LogicValue::Z => y + 31.0,
+    };
     let mut path = format!("M {:.2} {:.2}", x(points[0].at), level(points[0].value));
     for pair in points.windows(2) {
         let nx = x(pair[1].at);
         write!(path, " H {nx:.2} V {:.2}", level(pair[1].value)).unwrap();
     }
     write!(svg, r#"<path d="{path}" fill="none" stroke="{signal}" stroke-width="2.2" stroke-linejoin="round"/>"#).unwrap();
-    for point in points.iter().filter(|p| matches!(p.value, LogicValue::X | LogicValue::Z)) {
-        let label = if point.value == LogicValue::X { "X" } else { "Z" };
+    for point in points
+        .iter()
+        .filter(|p| matches!(p.value, LogicValue::X | LogicValue::Z))
+    {
+        let label = if point.value == LogicValue::X {
+            "X"
+        } else {
+            "Z"
+        };
         write!(svg, r#"<text x="{:.2}" y="{:.2}" fill="{muted}" font-family="ui-monospace,monospace" font-size="11">{label}</text>"#, x(point.at) + 5.0, y + 27.0).unwrap();
     }
 }
 
-fn render_bus(svg: &mut String, segments: &[BusSegment], y: f64, x: &impl Fn(f64) -> f64, bus: &str, panel: &str, text: &str) {
+fn render_bus(
+    svg: &mut String,
+    segments: &[BusSegment],
+    y: f64,
+    x: &impl Fn(f64) -> f64,
+    bus: &str,
+    panel: &str,
+    text: &str,
+) {
     for segment in segments {
         let left = x(segment.from);
         let right = x(segment.to);
@@ -227,7 +549,11 @@ fn render_bus(svg: &mut String, segments: &[BusSegment], y: f64, x: &impl Fn(f64
 }
 
 fn escape(value: &str) -> String {
-    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -264,5 +590,63 @@ signals:
         let svg = render_svg(&diagram, &RenderOptions::default()).unwrap();
         assert!(!svg.contains("<script>"));
         assert!(svg.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn parses_compact_dsl_into_the_shared_model() {
+        let source = r#"
+title "SPI Flash 读取"
+unit cycle
+clock SCLK period 2 cycles 8 start 1 group SPI
+signal CS_N high@0 low@1 high@17 group SPI
+bus MOSI "0x9F"@1..9 "ADDR"@9..17 group SPI
+mark "采样" @9
+"#;
+
+        let diagram = parse(source).expect("compact DSL should parse");
+
+        assert_eq!(diagram.title.as_deref(), Some("SPI Flash 读取"));
+        assert_eq!(diagram.unit, "cycle");
+        assert_eq!(diagram.signals.len(), 3);
+        assert_eq!(diagram.signals[0].name, "SCLK");
+        assert_eq!(diagram.signals[0].group.as_deref(), Some("SPI"));
+        assert_eq!(diagram.markers[0].label.as_deref(), Some("采样"));
+        assert_eq!(diagram.markers[0].at, 9.0);
+    }
+
+    #[test]
+    fn rejects_out_of_order_digital_points_on_the_source_line() {
+        let source = "title Demo\nsignal READY high@4 low@2\n";
+
+        let error = parse(source).expect_err("out-of-order points must be rejected");
+
+        assert!(error.to_string().contains("第 2 行"));
+        assert!(error.to_string().contains("严格递增"));
+    }
+
+    #[test]
+    fn rejects_overlapping_bus_segments_on_the_source_line() {
+        let source = "title Demo\nbus DATA A@0..4 B@3..8\n";
+
+        let error = parse(source).expect_err("overlapping bus segments must be rejected");
+
+        assert!(error.to_string().contains("第 2 行"));
+        assert!(error.to_string().contains("不能重叠"));
+    }
+
+    #[test]
+    fn yaml_uses_the_same_time_validation_as_dsl() {
+        let source = r#"
+signals:
+  - name: READY
+    digital:
+      points:
+        - { at: 4, value: high }
+        - { at: 2, value: low }
+"#;
+
+        let error = parse(source).expect_err("YAML must not bypass model validation");
+
+        assert!(error.to_string().contains("严格递增"));
     }
 }
