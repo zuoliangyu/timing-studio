@@ -7,14 +7,17 @@
     "wasm": "wasm-pack build crates/timing-wasm --target web --out-dir ../../src/wasm --out-name timing_wasm",
     "dev": "npm run wasm && vite",
     "build": "npm run wasm && tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

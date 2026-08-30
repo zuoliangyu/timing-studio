@@ -1,4 +1,4 @@
-use timing_core::{RenderOptions, parse, render_svg, to_dsl, to_yaml};
+use timing_core::{RenderOptions, parse, render_svg, render_tikz, to_dsl, to_yaml};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -12,6 +12,12 @@ pub fn render(source: &str, dark: bool) -> Result<String, JsValue> {
 pub fn inspect(source: &str) -> Result<String, JsValue> {
     let diagram = parse(source).map_err(js_error)?;
     serde_json::to_string(&diagram).map_err(js_error)
+}
+
+#[wasm_bindgen]
+pub fn tikz(source: &str) -> Result<String, JsValue> {
+    let diagram = parse(source).map_err(js_error)?;
+    render_tikz(&diagram).map_err(js_error)
 }
 
 #[wasm_bindgen]

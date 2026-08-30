@@ -151,7 +151,7 @@ mark "第一次传输" @6.5
 
 ```text
 document  := statement*
-statement := timing | title | unit | clock | signal | bus | mark | span
+statement := timing | title | unit | clock | signal | bus | mark | span | setup | hold | arrow
 timing    := "timing" "1"
 title     := "title" text
 unit      := "unit" token
@@ -160,6 +160,9 @@ signal    := "signal" name point+ ["group" name]
 bus       := "bus" name segment+ ["group" name]
 mark      := "mark" text marker-time
 span      := "span" time ".." time text
+setup     := "setup" time ".." time text
+hold      := "hold" time ".." time text
+arrow     := "arrow" name "@" time "->" name "@" time [text]
 point     := logic-at-time
 segment   := text-at-range
 marker-time  := "@" time
@@ -183,9 +186,50 @@ span 2..14 "固定闸门时间 T_g"
 
 区间标签支持轻量下标语法：`T_g` 表示单字符下标，`T_{gate}` 表示多字符下标。下标会直接写入自包含 SVG，不依赖 LaTeX 或 MathJax。
 
+## `setup` 与 `hold`
+
+```text
+setup <开始>..<结束> <标签>
+hold <开始>..<结束> <标签>
+```
+
+两者与 `span` 使用相同的时间和标签规则，用不同线型表达建立时间与保持时间：
+
+```text
+setup 1..2 "建立时间 T_setup"
+hold 2..3 "保持时间 T_hold"
+```
+
+在 YAML 中，这三类标注都位于 `spans` 数组；`kind` 可为 `interval`、`setup` 或 `hold`。为兼容旧文件，省略 `kind` 时默认为 `interval`，普通区间序列化时也会省略该字段。
+
+## `arrow`
+
+```text
+arrow <源信号>@<源时间> -> <目标信号>@<目标时间> [标签]
+```
+
+在两个信号的指定时间点之间绘制因果箭头。两个信号必须已经存在，时间必须是有限的非负数；标签可省略。
+
+```text
+signal REQ low@0 high@2
+signal ACK low@0 high@4
+arrow REQ@2 -> ACK@4 "响应"
+```
+
+包含空格的信号名仍需使用双引号，例如 `arrow "请求信号"@2 -> "应答信号"@4 "响应"`。
+
+对应 YAML 结构为：
+
+```yaml
+arrows:
+  - from: { signal: REQ, at: 2 }
+    to: { signal: ACK, at: 4 }
+    label: 响应
+```
+
 ## DSL 与 YAML 转换
 
-编辑器中的 `DSL` / `YAML` 控件通过 Rust `Diagram` 模型进行双向转换。转换保证标题、单位、信号、标记和区间标注的语义等价，但不会保留源文件注释、空行、字段顺序或手工排版。
+编辑器中的 `DSL` / `YAML` 控件通过 Rust `Diagram` 模型进行双向转换。转换保证标题、单位、信号、标记、区间标注和因果箭头的语义等价，但不会保留源文件注释、空行、字段顺序或手工排版。
 
 ## 格式识别
 
@@ -207,4 +251,5 @@ DSL 错误包含源文件行号。以下情况会拒绝整份文档：
 - 引号未闭合或使用未知转义；
 - 时间为负数、非有限数或顺序错误；
 - 总线区间无效或重叠；
+- 因果箭头引用不存在的信号，或箭头时间无效；
 - 没有任何信号。

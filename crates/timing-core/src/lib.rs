@@ -15,6 +15,8 @@ pub struct Diagram {
     pub markers: Vec<Marker>,
     #[serde(default)]
     pub spans: Vec<Span>,
+    #[serde(default)]
+    pub arrows: Vec<CausalArrow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,37 @@ pub struct Span {
     pub from: f64,
     pub to: f64,
     pub label: String,
+    #[serde(default, skip_serializing_if = "SpanKind::is_interval")]
+    pub kind: SpanKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpanKind {
+    #[default]
+    Interval,
+    Setup,
+    Hold,
+}
+
+impl SpanKind {
+    fn is_interval(&self) -> bool {
+        *self == Self::Interval
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CausalArrow {
+    pub from: ArrowAnchor,
+    pub to: ArrowAnchor,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArrowAnchor {
+    pub signal: String,
+    pub at: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -187,14 +220,34 @@ pub fn to_dsl(diagram: &Diagram) -> Result<String, TimingError> {
         .unwrap();
     }
     for span in &diagram.spans {
+        let keyword = match span.kind {
+            SpanKind::Interval => "span",
+            SpanKind::Setup => "setup",
+            SpanKind::Hold => "hold",
+        };
         writeln!(
             output,
-            "span {}..{} {}",
+            "{keyword} {}..{} {}",
             format_number(span.from),
             format_number(span.to),
             quote_dsl(&span.label)
         )
         .unwrap();
+    }
+    for arrow in &diagram.arrows {
+        write!(
+            output,
+            "arrow {}@{} -> {}@{}",
+            quote_dsl(&arrow.from.signal),
+            format_number(arrow.from.at),
+            quote_dsl(&arrow.to.signal),
+            format_number(arrow.to.at)
+        )
+        .unwrap();
+        if let Some(label) = &arrow.label {
+            write!(output, " {}", quote_dsl(label)).unwrap();
+        }
+        output.push('\n');
     }
     Ok(output)
 }
@@ -220,7 +273,17 @@ fn is_dsl(source: &str) -> bool {
         let keyword = line.split_whitespace().next().unwrap_or_default();
         if matches!(
             keyword,
-            "timing" | "title" | "unit" | "clock" | "signal" | "bus" | "mark" | "span"
+            "timing"
+                | "title"
+                | "unit"
+                | "clock"
+                | "signal"
+                | "bus"
+                | "mark"
+                | "span"
+                | "setup"
+                | "hold"
+                | "arrow"
         ) {
             return true;
         }
@@ -257,6 +320,7 @@ fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
         signals: Vec::new(),
         markers: Vec::new(),
         spans: Vec::new(),
+        arrows: Vec::new(),
     };
     let mut version_declared = false;
     let mut unit_declared = false;
@@ -304,7 +368,16 @@ fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
             "signal" => diagram.signals.push(parse_digital(&tokens, line_number)?),
             "bus" => diagram.signals.push(parse_bus(&tokens, line_number)?),
             "mark" => diagram.markers.push(parse_marker(&tokens, line_number)?),
-            "span" => diagram.spans.push(parse_span(&tokens, line_number)?),
+            "span" => diagram
+                .spans
+                .push(parse_span(&tokens, line_number, SpanKind::Interval)?),
+            "setup" => diagram
+                .spans
+                .push(parse_span(&tokens, line_number, SpanKind::Setup)?),
+            "hold" => diagram
+                .spans
+                .push(parse_span(&tokens, line_number, SpanKind::Hold)?),
+            "arrow" => diagram.arrows.push(parse_arrow(&tokens, line_number)?),
             keyword => return Err(dsl_error(line_number, &format!("未知语句 `{keyword}`"))),
         }
     }
@@ -490,8 +563,13 @@ fn parse_marker(tokens: &[String], line: usize) -> Result<Marker, TimingError> {
     })
 }
 
-fn parse_span(tokens: &[String], line: usize) -> Result<Span, TimingError> {
-    reject_extra(tokens, 3, line, "span")?;
+fn parse_span(tokens: &[String], line: usize, kind: SpanKind) -> Result<Span, TimingError> {
+    reject_extra(
+        tokens,
+        3,
+        line,
+        tokens.first().map(String::as_str).unwrap_or("span"),
+    )?;
     let range = required(tokens, 1, line, "区间范围")?;
     let (from, to) = range
         .split_once("..")
@@ -500,6 +578,32 @@ fn parse_span(tokens: &[String], line: usize) -> Result<Span, TimingError> {
         from: parse_number(from, line, "区间开始时间")?,
         to: parse_number(to, line, "区间结束时间")?,
         label: required(tokens, 2, line, "区间标签")?.to_owned(),
+        kind,
+    })
+}
+
+fn parse_arrow(tokens: &[String], line: usize) -> Result<CausalArrow, TimingError> {
+    reject_extra(tokens, 5, line, "arrow")?;
+    if required(tokens, 2, line, "箭头方向")? != "->" {
+        return Err(dsl_error(line, "因果箭头应使用 `->` 连接两个锚点"));
+    }
+    Ok(CausalArrow {
+        from: parse_arrow_anchor(required(tokens, 1, line, "源锚点")?, line)?,
+        to: parse_arrow_anchor(required(tokens, 3, line, "目标锚点")?, line)?,
+        label: tokens.get(4).cloned(),
+    })
+}
+
+fn parse_arrow_anchor(value: &str, line: usize) -> Result<ArrowAnchor, TimingError> {
+    let (signal, at) = value
+        .rsplit_once('@')
+        .ok_or_else(|| dsl_error(line, "箭头锚点应写成 SIGNAL@2"))?;
+    if signal.trim().is_empty() {
+        return Err(dsl_error(line, "箭头锚点缺少信号名称"));
+    }
+    Ok(ArrowAnchor {
+        signal: signal.to_owned(),
+        at: parse_number(at, line, "箭头时间")?,
     })
 }
 
@@ -637,7 +741,191 @@ fn validate(diagram: &Diagram) -> Result<(), TimingError> {
             "区间标注必须有标签，且结束时间必须大于非负的开始时间".into(),
         ));
     }
+    for arrow in &diagram.arrows {
+        if !names.contains(arrow.from.signal.as_str()) || !names.contains(arrow.to.signal.as_str())
+        {
+            return Err(TimingError::Invalid(
+                "因果箭头引用的源信号和目标信号必须存在".into(),
+            ));
+        }
+        if !arrow.from.at.is_finite()
+            || !arrow.to.at.is_finite()
+            || arrow.from.at < 0.0
+            || arrow.to.at < 0.0
+        {
+            return Err(TimingError::Invalid(
+                "因果箭头时间必须是有限的非负数".into(),
+            ));
+        }
+    }
     Ok(())
+}
+
+pub fn render_tikz(diagram: &Diagram) -> Result<String, TimingError> {
+    validate(diagram)?;
+    let max_time = diagram
+        .signals
+        .iter()
+        .map(signal_end)
+        .chain(diagram.markers.iter().map(|marker| marker.at))
+        .chain(diagram.spans.iter().map(|span| span.to))
+        .chain(
+            diagram
+                .arrows
+                .iter()
+                .flat_map(|arrow| [arrow.from.at, arrow.to.at]),
+        )
+        .fold(1.0, f64::max);
+    let row_y = |index: usize| -(index as f64) * 1.2;
+    let level_y = |index: usize, value: LogicValue| {
+        row_y(index)
+            + match value {
+                LogicValue::High => 0.28,
+                LogicValue::Low => -0.28,
+                LogicValue::X | LogicValue::Z => 0.0,
+            }
+    };
+
+    let mut output = String::from(
+        "% Timing Studio TikZ export\n\\begin{tikzpicture}[x=0.65cm,y=0.8cm,>=stealth,line cap=rect,line join=miter]\n",
+    );
+    if let Some(title) = &diagram.title {
+        writeln!(
+            output,
+            "  \\node[anchor=west,font=\\bfseries] at (0,0.9) {{{}}};",
+            escape_latex(title)
+        )
+        .unwrap();
+    }
+
+    for (index, signal) in diagram.signals.iter().enumerate() {
+        let y = row_y(index);
+        writeln!(
+            output,
+            "  \\node[anchor=east] at (-0.25,{y:.3}) {{{}}};",
+            escape_latex(&signal.name)
+        )
+        .unwrap();
+        match &signal.kind {
+            SignalKind::Clock {
+                period,
+                cycles,
+                start,
+            } => {
+                let half = period / 2.0;
+                let mut path = format!("({start:.3},{:.3})", y - 0.28);
+                for step in 0..(*cycles * 2) {
+                    let next_x = start + (step + 1) as f64 * half;
+                    let next_y = if step % 2 == 0 { y + 0.28 } else { y - 0.28 };
+                    write!(
+                        path,
+                        " -- ({:.3},{next_y:.3}) -- ({next_x:.3},{next_y:.3})",
+                        start + step as f64 * half
+                    )
+                    .unwrap();
+                }
+                writeln!(output, "  \\draw[thick] {path};").unwrap();
+            }
+            SignalKind::Digital { points } => {
+                let mut path = format!(
+                    "({:.3},{:.3})",
+                    points[0].at,
+                    level_y(index, points[0].value)
+                );
+                for pair in points.windows(2) {
+                    write!(
+                        path,
+                        " -- ({:.3},{:.3}) -- ({:.3},{:.3})",
+                        pair[1].at,
+                        level_y(index, pair[0].value),
+                        pair[1].at,
+                        level_y(index, pair[1].value)
+                    )
+                    .unwrap();
+                }
+                write!(
+                    path,
+                    " -- ({max_time:.3},{:.3})",
+                    level_y(index, points.last().expect("validated points").value)
+                )
+                .unwrap();
+                writeln!(output, "  \\draw[thick] {path};").unwrap();
+            }
+            SignalKind::Bus { segments } => {
+                for segment in segments {
+                    writeln!(output, "  \\draw[thick] ({:.3},{:.3}) rectangle ({:.3},{:.3}) node[midway,fill=white,inner sep=1pt] {{{}}};",
+                        segment.from, y - 0.3, segment.to, y + 0.3, escape_latex(&segment.value)).unwrap();
+                }
+            }
+        }
+    }
+
+    let chart_top = 0.48;
+    let chart_bottom = row_y(diagram.signals.len().saturating_sub(1)) - 0.48;
+    for marker in &diagram.markers {
+        writeln!(output, "  \\draw[dashed,gray] ({:.3},{chart_top:.3}) -- ({:.3},{chart_bottom:.3}) node[above] {{{}}};",
+            marker.at, marker.at, escape_latex(marker.label.as_deref().unwrap_or("标记"))).unwrap();
+    }
+    for arrow in &diagram.arrows {
+        let from_index = diagram
+            .signals
+            .iter()
+            .position(|signal| signal.name == arrow.from.signal)
+            .expect("validated arrow source");
+        let to_index = diagram
+            .signals
+            .iter()
+            .position(|signal| signal.name == arrow.to.signal)
+            .expect("validated arrow target");
+        let label = arrow.label.as_deref().map(escape_latex).unwrap_or_default();
+        writeln!(output, "  \\draw[->] ({:.3},{:.3}) -- ({:.3},{:.3}) node[midway,above,fill=white,inner sep=1pt] {{{label}}};",
+            arrow.from.at, row_y(from_index), arrow.to.at, row_y(to_index)).unwrap();
+    }
+    for (index, span) in diagram.spans.iter().enumerate() {
+        let y = chart_bottom - 0.65 - index as f64 * 0.55;
+        let style = match span.kind {
+            SpanKind::Interval => "<->",
+            SpanKind::Setup => "<->,densely dashed",
+            SpanKind::Hold => "<->,dotted",
+        };
+        writeln!(
+            output,
+            "  \\draw[{style}] ({:.3},{y:.3}) -- ({:.3},{y:.3}) node[midway,below] {{{}}};",
+            span.from,
+            span.to,
+            escape_latex(&span.label)
+        )
+        .unwrap();
+    }
+    writeln!(
+        output,
+        "  \\node[anchor=east,font=\\scriptsize] at ({max_time:.3},{:.3}) {{{}}};",
+        chart_bottom - 0.2,
+        escape_latex(&diagram.unit)
+    )
+    .unwrap();
+    output.push_str("\\end{tikzpicture}\n");
+    Ok(output)
+}
+
+fn escape_latex(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\textbackslash{}"),
+            '&' => escaped.push_str("\\&"),
+            '%' => escaped.push_str("\\%"),
+            '$' => escaped.push_str("\\$"),
+            '#' => escaped.push_str("\\#"),
+            '_' => escaped.push_str("\\_"),
+            '{' => escaped.push_str("\\{"),
+            '}' => escaped.push_str("\\}"),
+            '~' => escaped.push_str("\\~{}"),
+            '^' => escaped.push_str("\\^{}"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String, TimingError> {
@@ -648,22 +936,32 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
         .map(signal_end)
         .chain(diagram.markers.iter().map(|m| m.at))
         .chain(diagram.spans.iter().map(|span| span.to))
+        .chain(
+            diagram
+                .arrows
+                .iter()
+                .flat_map(|arrow| [arrow.from.at, arrow.to.at]),
+        )
         .fold(1.0, f64::max);
     let label_width = 190.0;
     let chart_width = 900.0;
     let row_height = 58.0;
     let top = if diagram.title.is_some() { 78.0 } else { 42.0 };
-    let bottom = if diagram.spans.is_empty() { 40.0 } else { 92.0 };
+    let bottom = if diagram.spans.is_empty() {
+        40.0
+    } else {
+        68.0 + diagram.spans.len() as f64 * 24.0
+    };
     let width = label_width + chart_width + 24.0;
     let height = top + diagram.signals.len() as f64 * row_height + bottom;
     let x = |time: f64| label_width + (time / max_time) * chart_width;
 
     let mut svg = String::new();
-    write!(svg, r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{}"><defs><marker id="span-arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto-start-reverse"><path d="M 0 0 L 7 3.5 L 0 7" fill="none" stroke="#111" stroke-width="1"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>"##,
+    write!(svg, r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{}" shape-rendering="geometricPrecision" text-rendering="geometricPrecision"><defs><marker id="span-arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto-start-reverse"><path d="M 0 0 L 7 3.5 L 0 7" fill="none" stroke="#111" stroke-width="1"/></marker><marker id="cause-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#111"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>"##,
         escape(diagram.title.as_deref().unwrap_or("时序图"))).unwrap();
 
     if let Some(title) = &diagram.title {
-        write!(svg, r##"<text x="{:.0}" y="40" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="19" font-weight="600">{}</text>"##, label_width, escape(title)).unwrap();
+        write!(svg, r##"<text x="{:.0}" y="40" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="19" font-weight="600">{}</text>"##, label_width, escape(title)).unwrap();
     }
 
     let tick_count = max_time.ceil().clamp(1.0, 40.0) as usize;
@@ -679,7 +977,7 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
 
     for (index, item) in diagram.signals.iter().enumerate() {
         let y = top + index as f64 * row_height;
-        write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="17" text-anchor="end">{}</text>"##, label_width - 18.0, y + 36.0, escape(&item.name)).unwrap();
+        write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="17" text-anchor="end">{}</text>"##, label_width - 18.0, y + 36.0, escape(&item.name)).unwrap();
         match &item.kind {
             SignalKind::Clock {
                 period,
@@ -708,16 +1006,42 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
         let mx = x(mark.at);
         write!(svg, r##"<line x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{:.2}" stroke="#555" stroke-width="1.2" stroke-dasharray="4 4"/>"##, top - 8.0, height - bottom).unwrap();
         if let Some(label) = &mark.label {
-            write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#333" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="12">{}</text>"##,
+            write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#333" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12">{}</text>"##,
                 mx + 5.0, top - 10.0, escape(label)).unwrap();
+        }
+    }
+    for arrow in &diagram.arrows {
+        let from_index = diagram
+            .signals
+            .iter()
+            .position(|signal| signal.name == arrow.from.signal)
+            .expect("causal arrow source was validated");
+        let to_index = diagram
+            .signals
+            .iter()
+            .position(|signal| signal.name == arrow.to.signal)
+            .expect("causal arrow target was validated");
+        let from_x = x(arrow.from.at);
+        let to_x = x(arrow.to.at);
+        let from_y = top + from_index as f64 * row_height + 31.0;
+        let to_y = top + to_index as f64 * row_height + 31.0;
+        write!(svg, r##"<path data-annotation="causal-arrow" d="M {from_x:.2} {from_y:.2} L {to_x:.2} {to_y:.2}" fill="none" stroke="#111" stroke-width="1.4" marker-end="url(#cause-arrow)"/>"##).unwrap();
+        if let Some(label) = &arrow.label {
+            write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12" text-anchor="middle">{}</text>"##,
+                (from_x + to_x) / 2.0, (from_y + to_y) / 2.0 - 7.0, render_math_label(label)).unwrap();
         }
     }
     for (index, span) in diagram.spans.iter().enumerate() {
         let sy = height - bottom + 30.0 + index as f64 * 24.0;
-        write!(svg, r##"<line x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2" marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
+        let (annotation, dash) = match span.kind {
+            SpanKind::Interval => ("span", ""),
+            SpanKind::Setup => ("setup", r#" stroke-dasharray="5 3""#),
+            SpanKind::Hold => ("hold", r#" stroke-dasharray="2 3""#),
+        };
+        write!(svg, r##"<line data-annotation="{annotation}" x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2"{dash} marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
             x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 22.0, render_math_label(&span.label)).unwrap();
     }
-    write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#555" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
+    write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#555" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
     Ok(svg)
 }
 
@@ -765,7 +1089,7 @@ fn render_digital(
         } else {
             "Z"
         };
-        write!(svg, r#"<text x="{:.2}" y="{:.2}" fill="{muted}" font-family="ui-monospace,monospace" font-size="11">{label}</text>"#, x(point.at) + 5.0, y + 27.0).unwrap();
+        write!(svg, r#"<text x="{:.2}" y="{:.2}" fill="{muted}" font-family="'Cascadia Mono',Consolas,'Courier New',SimSun,monospace" font-size="11">{label}</text>"#, x(point.at) + 5.0, y + 27.0).unwrap();
     }
 }
 
@@ -792,7 +1116,7 @@ fn render_bus(
             y + 42.0,
             left + 7.0,
         );
-        write!(svg, r#"<path d="{path}" fill="{panel}" stroke="{bus}" stroke-width="2"/><text x="{:.2}" y="{:.2}" fill="{text}" font-family="ui-monospace,monospace" font-size="12" text-anchor="middle">{}</text>"#, (left + right) / 2.0, y + 35.0, escape(&segment.value)).unwrap();
+        write!(svg, r#"<path d="{path}" fill="{panel}" stroke="{bus}" stroke-width="2"/><text x="{:.2}" y="{:.2}" fill="{text}" font-family="'Cascadia Mono',Consolas,'Courier New',SimSun,monospace" font-size="12" text-anchor="middle">{}</text>"#, (left + right) / 2.0, y + 35.0, escape(&segment.value)).unwrap();
     }
 }
 
@@ -1106,5 +1430,89 @@ signals:
         assert!(svg.contains("baseline-shift=\"sub\">gate</tspan>"));
         assert!(svg.contains("baseline-shift=\"sub\">h</tspan>"));
         assert!(svg.contains("&amp;"));
+    }
+
+    #[test]
+    fn round_trips_setup_hold_and_causal_arrows() {
+        let source = r#"timing 1
+signal REQ low@0 high@2
+signal ACK low@0 high@4
+setup 1..2 "建立时间 T_setup"
+hold 2..3 "保持时间 T_hold"
+arrow REQ@2 -> ACK@4 "响应"
+"#;
+
+        let diagram = parse(source).expect("paper annotations should parse");
+        assert_eq!(diagram.spans[0].kind, SpanKind::Setup);
+        assert_eq!(diagram.spans[1].kind, SpanKind::Hold);
+        assert_eq!(diagram.arrows[0].from.signal, "REQ");
+        assert_eq!(diagram.arrows[0].to.signal, "ACK");
+
+        let yaml = to_yaml(&diagram).expect("annotations should serialize to YAML");
+        let round_trip = parse(&yaml).expect("annotation YAML should parse");
+        let dsl = to_dsl(&round_trip).expect("annotations should serialize to DSL");
+        assert!(dsl.contains("setup 1..2 \"建立时间 T_setup\""));
+        assert!(dsl.contains("hold 2..3 \"保持时间 T_hold\""));
+        assert!(dsl.contains("arrow \"REQ\"@2 -> \"ACK\"@4 \"响应\""));
+
+        let svg = render_svg(&round_trip, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("data-annotation=\"setup\""));
+        assert!(svg.contains("data-annotation=\"hold\""));
+        assert!(svg.contains("data-annotation=\"causal-arrow\""));
+        assert!(svg.contains("响应"));
+    }
+
+    #[test]
+    fn exports_tikz_with_paper_annotations() {
+        let diagram = parse(
+            "signal REQ low@0 high@2\nsignal ACK low@0 high@4\nsetup 1..2 \"T_setup\"\narrow REQ@2 -> ACK@4 \"cause_1\"\n",
+        )
+        .unwrap();
+
+        let tikz = render_tikz(&diagram).expect("valid diagrams should export TikZ");
+
+        assert!(tikz.contains("\\begin{tikzpicture}"));
+        assert!(tikz.contains("\\draw[->]"));
+        assert!(tikz.contains("T\\_setup"));
+        assert!(tikz.contains("cause\\_1"));
+        assert!(tikz.contains("REQ"));
+        assert!(tikz.contains("ACK"));
+    }
+
+    #[test]
+    fn rejects_causal_arrows_that_reference_missing_signals() {
+        let error = parse("signal REQ low@0 high@2\narrow REQ@2 -> ACK@4 \"响应\"\n")
+            .expect_err("arrows must reference existing signals");
+
+        assert!(error.to_string().contains("源信号和目标信号必须存在"));
+    }
+
+    #[test]
+    fn keeps_old_yaml_without_annotation_fields_compatible() {
+        let diagram = parse(SAMPLE).expect("old YAML should keep parsing");
+
+        assert!(diagram.spans.is_empty());
+        assert!(diagram.arrows.is_empty());
+
+        let old_span = parse(
+            "signals:\n  - name: A\n    digital: { points: [{ at: 0, value: low }] }\nspans:\n  - { from: 0, to: 1, label: window }\n",
+        )
+        .expect("span kind must remain optional");
+        assert_eq!(old_span.spans[0].kind, SpanKind::Interval);
+    }
+
+    #[test]
+    fn expands_svg_height_for_multiple_span_annotations() {
+        let one_span = parse("signal A low@0 high@2\nspan 0..1 \"窗口一\"\n").unwrap();
+        let three_spans = parse(
+            "signal A low@0 high@2\nspan 0..1 \"窗口一\"\nsetup 1..2 \"建立时间\"\nhold 2..3 \"保持时间\"\n",
+        )
+        .unwrap();
+        let one_svg = render_svg(&one_span, &RenderOptions::default()).unwrap();
+        let three_svg = render_svg(&three_spans, &RenderOptions::default()).unwrap();
+
+        assert!(one_svg.contains("viewBox=\"0 0 1114 192\""));
+        assert!(three_svg.contains("viewBox=\"0 0 1114 240\""));
+        assert_eq!(three_svg.matches("data-annotation=").count(), 3);
     }
 }
