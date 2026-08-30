@@ -1,0 +1,9 @@
+/node_modules
+/dist
+/target
+/src/wasm
+/.playwright-cli
+/output
+*.log
+*.tsbuildinfo
+

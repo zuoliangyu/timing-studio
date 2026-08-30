@@ -1,0 +1,14 @@
+[package]
+name = "timing-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+timing-core = { path = "../timing-core" }
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+
