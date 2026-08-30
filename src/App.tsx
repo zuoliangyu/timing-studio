@@ -1,6 +1,6 @@
 import {
-  ArrowDown, ArrowDownUp, ArrowLeft, ArrowRight, ArrowUp, Blocks, Bus, Check, ChevronDown,
-  Clock3, Copy, Download, FileCode2, FileDown, FileText, FileUp, GripVertical,
+  AlignLeft, ArrowDown, ArrowDownUp, ArrowLeft, ArrowRight, ArrowUp, Blocks, Bus, Check, ChevronDown,
+  CircleHelp, Clock3, Copy, Download, FileCode2, FileDown, FileText, FileUp, GripVertical,
   Highlighter, ImageDown, Layers3, Maximize2, MoveRight, Plus, Radio, Redo2, RotateCcw,
   Rows3, Search, Timer, Trash2, Undo2, Zap, ZoomIn, ZoomOut,
 } from "lucide-react";
@@ -47,6 +47,7 @@ function App() {
   const [snippetMenuOpen, setSnippetMenuOpen] = useState(false);
   const [spanMenuOpen, setSpanMenuOpen] = useState(false);
   const [groupPanelOpen, setGroupPanelOpen] = useState(false);
+  const [sourceHelpOpen, setSourceHelpOpen] = useState(false);
   const [selectedSignal, setSelectedSignal] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [exportingPng, setExportingPng] = useState(false);
@@ -130,6 +131,7 @@ function App() {
 
   const changeFormat = (nextFormat: SourceFormat) => {
     if (!ready) return;
+    setSourceHelpOpen(false);
     if (nextFormat === format) {
       setEditorMode(nextFormat);
       return;
@@ -137,6 +139,15 @@ function App() {
     try {
       applySource(convert(source, nextFormat), nextFormat);
       setEditorMode(nextFormat);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  const formatSource = () => {
+    if (!ready || error || validating) return;
+    try {
+      applySource(convert(source, format), format);
     } catch (reason) {
       setError(String(reason));
     }
@@ -365,6 +376,8 @@ function App() {
     setExampleOpen(false);
   };
 
+  const canInsert = ready && !error && !validating && Boolean(diagram);
+
   return <main className="app-shell">
     <header className="topbar">
       <div className="brand"><span className="brand-mark"><Zap size={17} /></span><div><strong>Timing Studio</strong><small>论文级数字时序绘图</small></div></div>
@@ -388,56 +401,58 @@ function App() {
       </div>
     </header>
 
-    <nav className={`command-shelf ${editorMode === "blocks" ? "is-active" : ""}`} aria-label="快捷积木栏">
-      <span><Blocks size={14} />积木</span>
-      <div className="insert-picker">
-        <button aria-expanded={signalMenuOpen} aria-haspopup="menu" onClick={() => { setEditorMode("blocks"); setSignalMenuOpen((value) => !value); setSnippetMenuOpen(false); setSpanMenuOpen(false); }}><Plus size={15} />插入信号<ChevronDown size={13} /></button>
-        {signalMenuOpen && <div className="insert-menu signal-template-menu" role="menu">
-          <button role="menuitem" onClick={() => { addSignalTemplate("clock"); setSignalMenuOpen(false); }}><MiniWave kind="clock" /><span><strong>时钟</strong><small>连续周期翻转</small></span></button>
-          <button role="menuitem" onClick={() => { addSignalTemplate("pulse"); setSignalMenuOpen(false); }}><MiniWave kind="pulse" /><span><strong>正脉冲</strong><small>低电平中出现高脉冲</small></span></button>
-          <button role="menuitem" onClick={() => { addSignalTemplate("negative-pulse"); setSignalMenuOpen(false); }}><MiniWave kind="negative-pulse" /><span><strong>负脉冲</strong><small>高电平中出现低脉冲</small></span></button>
-          <button role="menuitem" onClick={() => { addSignalTemplate("low"); setSignalMenuOpen(false); }}><MiniWave kind="low" /><span><strong>恒定低电平</strong><small>初始值为 LOW</small></span></button>
-          <button role="menuitem" onClick={() => { addSignalTemplate("high"); setSignalMenuOpen(false); }}><MiniWave kind="high" /><span><strong>恒定高电平</strong><small>初始值为 HIGH</small></span></button>
-          <button role="menuitem" onClick={() => { addSignalTemplate("bus"); setSignalMenuOpen(false); }}><MiniWave kind="bus" /><span><strong>总线</strong><small>带一个数据片段</small></span></button>
-        </div>}
-      </div>
-      <div className="insert-picker">
-        <button aria-expanded={snippetMenuOpen} aria-haspopup="menu" onClick={() => { setEditorMode("blocks"); setSnippetMenuOpen((value) => !value); setSignalMenuOpen(false); setSpanMenuOpen(false); }}><Layers3 size={15} />插入常用片段<ChevronDown size={13} /></button>
-        {snippetMenuOpen && <div className="insert-menu snippet-menu" role="menu">
-          <button role="menuitem" onClick={() => { addSnippet("clock-reset"); setSnippetMenuOpen(false); }}><Clock3 size={18} /><span><strong>时钟 + 复位</strong><small>CLK 与低有效复位</small></span></button>
-          <button role="menuitem" onClick={() => { addSnippet("handshake"); setSnippetMenuOpen(false); }}><MoveRight size={18} /><span><strong>Ready / Valid 握手</strong><small>VALID、READY 与 DATA</small></span></button>
-          <button role="menuitem" onClick={() => { addSnippet("spi"); setSnippetMenuOpen(false); }}><Bus size={18} /><span><strong>SPI 读取</strong><small>SCLK、片选与双向数据</small></span></button>
-        </div>}
-      </div>
-      <button aria-expanded={groupPanelOpen} onClick={() => { setEditorMode("blocks"); setGroupPanelOpen((value) => !value); }}><Layers3 size={15} />分组操作</button>
-      <i aria-hidden="true" />
-      <button onClick={() => { setEditorMode("blocks"); mutateDiagram((draft) => draft.markers.push({ at: 1, label: "标记" })); }}><Highlighter size={15} />时间标记</button>
-      <div className="insert-picker">
-        <button aria-expanded={spanMenuOpen} aria-haspopup="menu" onClick={() => { setEditorMode("blocks"); setSpanMenuOpen((value) => !value); setSignalMenuOpen(false); setSnippetMenuOpen(false); }}><Timer size={15} />插入区间<ChevronDown size={13} /></button>
-        {spanMenuOpen && <div className="insert-menu compact-menu" role="menu">
-          <button role="menuitem" onClick={() => { addSpan(); setSpanMenuOpen(false); }}>区间箭头</button>
-          <button role="menuitem" onClick={() => { addSpan("setup"); setSpanMenuOpen(false); }}>建立时间</button>
-          <button role="menuitem" onClick={() => { addSpan("hold"); setSpanMenuOpen(false); }}>保持时间</button>
-        </div>}
-      </div>
-      <button onClick={() => { setEditorMode("blocks"); addArrow(); }}><MoveRight size={15} />因果箭头</button>
-    </nav>
-
     <section className="workspace">
       <section className={`editor-pane mode-${editorMode}`} role="tabpanel" aria-labelledby={`mode-${editorMode}-tab`}>
         <div className="pane-heading">
           <div><span className="pane-kicker">EDITOR</span><h1>{editorMode === "blocks" ? "积木编辑" : "时序描述"}</h1></div>
           <div className="source-actions">
             <div className="format-switch" role="tablist" aria-label="编辑格式">
-              <button id="mode-blocks-tab" role="tab" aria-selected={editorMode === "blocks"} tabIndex={editorMode === "blocks" ? 0 : -1} className={editorMode === "blocks" ? "active" : ""} onClick={() => setEditorMode("blocks")}><Blocks size={12} />积木</button>
+              <button id="mode-blocks-tab" role="tab" aria-selected={editorMode === "blocks"} tabIndex={editorMode === "blocks" ? 0 : -1} className={editorMode === "blocks" ? "active" : ""} onClick={() => { setEditorMode("blocks"); setSourceHelpOpen(false); }}><Blocks size={12} />积木</button>
               <button id="mode-dsl-tab" role="tab" aria-selected={editorMode === "dsl"} tabIndex={editorMode === "dsl" ? 0 : -1} className={editorMode === "dsl" ? "active" : ""} onClick={() => changeFormat("dsl")}>DSL</button>
               <button id="mode-yaml-tab" role="tab" aria-selected={editorMode === "yaml"} tabIndex={editorMode === "yaml" ? 0 : -1} className={editorMode === "yaml" ? "active" : ""} onClick={() => changeFormat("yaml")}>YAML</button>
             </div>
+            {editorMode !== "blocks" && <button className="icon-control subtle" title={`格式化当前 ${format.toUpperCase()}`} disabled={!canInsert} onClick={formatSource}><AlignLeft size={15} /></button>}
+            {editorMode !== "blocks" && <button className="icon-control subtle" aria-controls="source-guide" aria-expanded={sourceHelpOpen} aria-label={`查看 ${format.toUpperCase()} 使用说明`} onClick={() => setSourceHelpOpen((value) => !value)}><CircleHelp size={15} /></button>}
             <button className="icon-control subtle" title="恢复闸门示例" onClick={() => loadExample(defaultSource)}><RotateCcw size={15} /></button>
           </div>
         </div>
+        <nav className="command-shelf" aria-label="添加内容">
+          <span><Plus size={14} />添加内容</span>
+          <div className="insert-picker">
+            <button disabled={!canInsert} aria-expanded={signalMenuOpen} aria-haspopup="menu" onClick={() => { setSignalMenuOpen((value) => !value); setSnippetMenuOpen(false); setSpanMenuOpen(false); }}><Plus size={15} />插入信号<ChevronDown size={13} /></button>
+            {signalMenuOpen && <div className="insert-menu signal-template-menu" role="menu">
+              <button role="menuitem" onClick={() => { addSignalTemplate("clock"); setSignalMenuOpen(false); }}><MiniWave kind="clock" /><span><strong>时钟</strong><small>连续周期翻转</small></span></button>
+              <button role="menuitem" onClick={() => { addSignalTemplate("pulse"); setSignalMenuOpen(false); }}><MiniWave kind="pulse" /><span><strong>正脉冲</strong><small>低电平中出现高脉冲</small></span></button>
+              <button role="menuitem" onClick={() => { addSignalTemplate("negative-pulse"); setSignalMenuOpen(false); }}><MiniWave kind="negative-pulse" /><span><strong>负脉冲</strong><small>高电平中出现低脉冲</small></span></button>
+              <button role="menuitem" onClick={() => { addSignalTemplate("low"); setSignalMenuOpen(false); }}><MiniWave kind="low" /><span><strong>恒定低电平</strong><small>初始值为 LOW</small></span></button>
+              <button role="menuitem" onClick={() => { addSignalTemplate("high"); setSignalMenuOpen(false); }}><MiniWave kind="high" /><span><strong>恒定高电平</strong><small>初始值为 HIGH</small></span></button>
+              <button role="menuitem" onClick={() => { addSignalTemplate("bus"); setSignalMenuOpen(false); }}><MiniWave kind="bus" /><span><strong>总线</strong><small>带一个数据片段</small></span></button>
+            </div>}
+          </div>
+          <div className="insert-picker">
+            <button disabled={!canInsert} aria-expanded={snippetMenuOpen} aria-haspopup="menu" onClick={() => { setSnippetMenuOpen((value) => !value); setSignalMenuOpen(false); setSpanMenuOpen(false); }}><Layers3 size={15} />插入常用片段<ChevronDown size={13} /></button>
+            {snippetMenuOpen && <div className="insert-menu snippet-menu" role="menu">
+              <button role="menuitem" onClick={() => { addSnippet("clock-reset"); setSnippetMenuOpen(false); }}><Clock3 size={18} /><span><strong>时钟 + 复位</strong><small>CLK 与低有效复位</small></span></button>
+              <button role="menuitem" onClick={() => { addSnippet("handshake"); setSnippetMenuOpen(false); }}><MoveRight size={18} /><span><strong>Ready / Valid 握手</strong><small>VALID、READY 与 DATA</small></span></button>
+              <button role="menuitem" onClick={() => { addSnippet("spi"); setSnippetMenuOpen(false); }}><Bus size={18} /><span><strong>SPI 读取</strong><small>SCLK、片选与双向数据</small></span></button>
+            </div>}
+          </div>
+          {editorMode === "blocks" && <button disabled={!canInsert} aria-expanded={groupPanelOpen} onClick={() => setGroupPanelOpen((value) => !value)}><Layers3 size={15} />分组操作</button>}
+          <i aria-hidden="true" />
+          <button disabled={!canInsert} onClick={() => { mutateDiagram((draft) => draft.markers.push({ at: 1, label: "标记" })); }}><Highlighter size={15} />时间标记</button>
+          <div className="insert-picker">
+            <button disabled={!canInsert} aria-expanded={spanMenuOpen} aria-haspopup="menu" onClick={() => { setSpanMenuOpen((value) => !value); setSignalMenuOpen(false); setSnippetMenuOpen(false); }}><Timer size={15} />插入区间<ChevronDown size={13} /></button>
+            {spanMenuOpen && <div className="insert-menu compact-menu" role="menu">
+              <button role="menuitem" onClick={() => { addSpan(); setSpanMenuOpen(false); }}>区间箭头</button>
+              <button role="menuitem" onClick={() => { addSpan("setup"); setSpanMenuOpen(false); }}>建立时间</button>
+              <button role="menuitem" onClick={() => { addSpan("hold"); setSpanMenuOpen(false); }}>保持时间</button>
+            </div>}
+          </div>
+          <button disabled={!canInsert} onClick={() => { addArrow(); }}><MoveRight size={15} />因果箭头</button>
+        </nav>
         {editorMode === "blocks" && diagram ? <BlockEditor diagram={diagram} selected={selectedSignal} onSelect={setSelectedSignal} mutate={mutateDiagram} removeSignal={removeSignal} duplicateSignal={duplicateSignal} moveSignal={moveSignal} editError={editError} groupPanelOpen={groupPanelOpen} onCloseGroupPanel={() => setGroupPanelOpen(false)} /> : <>
           <div className="editor-wrap">
+            {sourceHelpOpen && <SourceGuide format={format} />}
             <div ref={lineNumbersRef} className="line-numbers" aria-hidden="true">{source.split("\n").map((_, index) => <span className={errorLine === index + 1 ? "line-error" : ""} key={index}>{index + 1}</span>)}</div>
             <textarea ref={editorRef} value={source} onFocus={() => { textEditStartRef.current = { source, format, mode: editorMode }; }} onBlur={() => {
               const start = textEditStartRef.current;
@@ -480,6 +495,37 @@ type MutateDiagram = (mutate: (draft: Diagram) => void) => boolean;
 
 function MiniWave({ kind }: { kind: "clock" | "pulse" | "negative-pulse" | "low" | "high" | "bus" }) {
   return <span className={`mini-wave ${kind}`} aria-hidden="true"><i /><i /><i /><i /></span>;
+}
+
+function SourceGuide({ format }: { format: SourceFormat }) {
+  const docsUrl = format === "dsl"
+    ? "https://github.com/zuoliangyu/timing-studio/blob/main/docs/dsl.md"
+    : "https://github.com/zuoliangyu/timing-studio/blob/main/docs/user-guide.md";
+
+  return <aside id="source-guide" className="source-guide" role="region" aria-label={`${format.toUpperCase()} 使用说明`}>
+    <header><strong>{format === "dsl" ? "DSL 语法速查" : "YAML 结构说明"}</strong><span>修改后会自动校验并更新波形</span></header>
+    {format === "dsl" ? <>
+      <p>每行一条语句；名称或标签含空格时用双引号；<code>#</code> 开始注释。</p>
+      <dl>
+        <div><dt>时钟</dt><dd><code>clock CLK cycles 8 period 2</code></dd></div>
+        <div><dt>数字</dt><dd><code>signal READY low@0 high@2</code></dd></div>
+        <div><dt>总线</dt><dd><code>bus DATA A@0..4 B@4..8</code></dd></div>
+        <div><dt>标注</dt><dd><code>span 2..4 "窗口" under signal READY</code></dd></div>
+        <div><dt>因果</dt><dd><code>arrow READY@2 -&gt; ACK@4 "响应"</code></dd></div>
+      </dl>
+    </> : <>
+      <p>顶层描述图表；<code>signals</code> 是信号列表，每条信号选择 <code>clock</code>、<code>digital</code> 或 <code>bus</code> 之一。</p>
+      <pre>{`title: 示例
+unit: ns
+signals:
+  - name: CLK
+    clock: { period: 2, cycles: 4 }
+markers: []
+spans: []
+arrows: []`}</pre>
+    </>}
+    <a href={docsUrl} target="_blank" rel="noreferrer">查看完整{format === "dsl" ? " DSL 规范" : "用户手册"}</a>
+  </aside>;
 }
 
 function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplicateSignal, moveSignal, editError, groupPanelOpen, onCloseGroupPanel }: {

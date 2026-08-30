@@ -42,6 +42,39 @@ test("积木、YAML 与 DSL 围绕同一张图转换", async ({ page }) => {
   await expect(page.getByRole("img", { name: "自动化回归时序图" })).toBeVisible();
 });
 
+test("DSL 与 YAML 可以保持当前模式插入并格式化", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByText("DSL 有效 · 积木与波形已同步")).toBeVisible();
+  await expect(page.getByRole("tabpanel").getByRole("navigation", { name: "添加内容" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "分组操作" })).toHaveCount(0);
+
+  const dslTab = page.getByRole("tab", { name: "DSL", exact: true });
+  const dslSource = page.getByRole("textbox", { name: "DSL 时序描述" });
+  await page.getByRole("button", { name: "查看 DSL 使用说明" }).click();
+  await expect(page.getByRole("region", { name: "DSL 使用说明" })).toContainText("每行一条语句");
+  await dslSource.fill("timing 1\nunit    ns\nsignal   A   low@0   high@1");
+  await expect(page.getByText("DSL 有效 · 积木与波形已同步")).toBeVisible();
+  await page.getByRole("button", { name: "格式化当前 DSL" }).click();
+  await expect(dslSource).toHaveValue('timing 1\nunit "ns"\nsignal "A" low@0 high@1\n');
+
+  await page.getByRole("button", { name: "插入信号" }).click();
+  await page.getByRole("menuitem", { name: "时钟" }).click();
+  await expect(dslTab).toHaveAttribute("aria-selected", "true");
+  await expect(dslSource).toContainText('clock "CLK"');
+
+  const yamlTab = page.getByRole("tab", { name: "YAML", exact: true });
+  await yamlTab.click();
+  await page.getByRole("button", { name: "查看 YAML 使用说明" }).click();
+  await expect(page.getByRole("region", { name: "YAML 使用说明" })).toContainText("signals 是信号列表");
+  await page.getByRole("button", { name: "插入常用片段" }).click();
+  await page.getByRole("menuitem", { name: "Ready / Valid 握手" }).click();
+  await expect(yamlTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("textbox", { name: "YAML 时序描述" })).toContainText("name: VALID");
+
+  await page.getByRole("tab", { name: "积木", exact: true }).click();
+  await expect(page.getByRole("button", { name: "分组操作" })).toBeVisible();
+});
+
 test("大量信号可以筛选并切换紧凑视图", async ({ page }) => {
   await page.goto("/");
   const signals = Array.from({ length: 60 }, (_, index) => `signal SIG_${index} low@0 high@${index + 1}`);
