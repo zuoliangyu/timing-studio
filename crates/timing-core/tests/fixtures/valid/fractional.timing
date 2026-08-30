@@ -1,0 +1,6 @@
+timing 1
+unit ns
+clock CLK period 0.5 cycles 4 start 0.25
+signal ENABLE low@0 high@0.75 low@1.75
+bus DATA A@0.5..1.25 B@1.25..2.25
+

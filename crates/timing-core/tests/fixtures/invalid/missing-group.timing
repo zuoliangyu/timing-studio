@@ -1,0 +1,2 @@
+signal READY low@0 group
+

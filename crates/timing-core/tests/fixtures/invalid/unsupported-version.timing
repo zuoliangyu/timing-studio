@@ -1,0 +1,3 @@
+timing 2
+signal READY low@0 high@1
+

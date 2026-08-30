@@ -106,16 +106,42 @@ pub fn parse(source: &str) -> Result<Diagram, TimingError> {
 }
 
 fn is_dsl(source: &str) -> bool {
-    source
-        .lines()
-        .find_map(|line| {
-            let keyword = line.trim().split_whitespace().next()?;
-            (!keyword.starts_with('#')).then_some(matches!(
-                keyword,
-                "title" | "unit" | "clock" | "signal" | "bus" | "mark"
-            ))
-        })
-        .unwrap_or(false)
+    for raw_line in source.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let keyword = line.split_whitespace().next().unwrap_or_default();
+        if matches!(
+            keyword,
+            "timing" | "title" | "unit" | "clock" | "signal" | "bus" | "mark"
+        ) {
+            return true;
+        }
+        if line.starts_with('{') || line.starts_with('[') {
+            return false;
+        }
+        return !has_unquoted_colon(line);
+    }
+    false
+}
+
+fn has_unquoted_colon(line: &str) -> bool {
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ':' if !quoted => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
@@ -125,6 +151,8 @@ fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
         signals: Vec::new(),
         markers: Vec::new(),
     };
+    let mut version_declared = false;
+    let mut unit_declared = false;
 
     for (index, raw_line) in source.lines().enumerate() {
         let line_number = index + 1;
@@ -134,8 +162,37 @@ fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
         }
 
         match tokens[0].as_str() {
-            "title" => diagram.title = Some(required(&tokens, 1, line_number, "标题")?.to_owned()),
-            "unit" => diagram.unit = required(&tokens, 1, line_number, "时间单位")?.to_owned(),
+            "timing" => {
+                if version_declared {
+                    return Err(dsl_error(line_number, "timing 只能声明一次"));
+                }
+                reject_extra(&tokens, 2, line_number, "timing")?;
+                let version = required(&tokens, 1, line_number, "DSL 版本")?;
+                if version != "1" {
+                    return Err(dsl_error(
+                        line_number,
+                        &format!("不支持 DSL 版本 `{version}`"),
+                    ));
+                }
+                version_declared = true;
+            }
+            "title" => {
+                if diagram.title.is_some() {
+                    return Err(dsl_error(line_number, "title 只能声明一次"));
+                }
+                if tokens.len() > 2 {
+                    return Err(dsl_error(line_number, "带空格的标题必须使用双引号"));
+                }
+                diagram.title = Some(required(&tokens, 1, line_number, "标题")?.to_owned());
+            }
+            "unit" => {
+                if unit_declared {
+                    return Err(dsl_error(line_number, "unit 只能声明一次"));
+                }
+                reject_extra(&tokens, 2, line_number, "unit")?;
+                diagram.unit = required(&tokens, 1, line_number, "时间单位")?.to_owned();
+                unit_declared = true;
+            }
             "clock" => diagram.signals.push(parse_clock(&tokens, line_number)?),
             "signal" => diagram.signals.push(parse_digital(&tokens, line_number)?),
             "bus" => diagram.signals.push(parse_bus(&tokens, line_number)?),
@@ -150,9 +207,19 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut quoted = false;
+    let mut escaped = false;
 
     for ch in line.chars() {
+        if escaped {
+            match ch {
+                '"' | '\\' => token.push(ch),
+                _ => return Err(format!("不支持转义 `\\{ch}`，仅支持 `\\\"` 和 `\\\\`")),
+            }
+            escaped = false;
+            continue;
+        }
         match ch {
+            '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
             '#' if !quoted => break,
             ch if ch.is_whitespace() && !quoted => {
@@ -162,6 +229,9 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
             }
             _ => token.push(ch),
         }
+    }
+    if escaped {
+        return Err("引号内的反斜杠后缺少转义字符".into());
     }
     if quoted {
         return Err("引号未闭合".into());
@@ -174,8 +244,27 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
 
 fn parse_clock(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
     let name = required(tokens, 1, line, "时钟名称")?.to_owned();
+    let mut index = 2;
+    let mut seen = Vec::new();
+    while index < tokens.len() {
+        let key = &tokens[index];
+        if !matches!(key.as_str(), "period" | "cycles" | "start" | "group") {
+            return Err(dsl_error(line, &format!("未知时钟参数 `{key}`")));
+        }
+        if tokens.get(index + 1).is_none() {
+            return Err(dsl_error(line, &format!("时钟参数 `{key}` 缺少值")));
+        }
+        if seen.contains(&key.as_str()) {
+            return Err(dsl_error(line, &format!("时钟参数 `{key}` 不能重复")));
+        }
+        seen.push(key.as_str());
+        index += 2;
+    }
+    if !seen.contains(&"cycles") {
+        return Err(dsl_error(line, "时钟缺少必填参数 `cycles`"));
+    }
     let period = option_number(tokens, "period", line)?.unwrap_or(2.0);
-    let cycles = option_number(tokens, "cycles", line)?.unwrap_or(1.0);
+    let cycles = option_number(tokens, "cycles", line)?.expect("cycles presence checked above");
     if cycles.fract() != 0.0 || cycles < 0.0 || cycles > u32::MAX as f64 {
         return Err(dsl_error(line, "cycles 必须是正整数"));
     }
@@ -192,10 +281,7 @@ fn parse_clock(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
 
 fn parse_digital(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
     let name = required(tokens, 1, line, "信号名称")?.to_owned();
-    let end = tokens
-        .iter()
-        .position(|token| token == "group")
-        .unwrap_or(tokens.len());
+    let (end, group) = trailing_group(tokens, line)?;
     let points = tokens[2..end]
         .iter()
         .map(|token| {
@@ -226,17 +312,14 @@ fn parse_digital(tokens: &[String], line: usize) -> Result<Signal, TimingError> 
     }
     Ok(Signal {
         name,
-        group: option_text(tokens, "group").map(str::to_owned),
+        group,
         kind: SignalKind::Digital { points },
     })
 }
 
 fn parse_bus(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
     let name = required(tokens, 1, line, "总线名称")?.to_owned();
-    let end = tokens
-        .iter()
-        .position(|token| token == "group")
-        .unwrap_or(tokens.len());
+    let (end, group) = trailing_group(tokens, line)?;
     let segments = tokens[2..end]
         .iter()
         .map(|token| {
@@ -269,12 +352,26 @@ fn parse_bus(tokens: &[String], line: usize) -> Result<Signal, TimingError> {
     }
     Ok(Signal {
         name,
-        group: option_text(tokens, "group").map(str::to_owned),
+        group,
         kind: SignalKind::Bus { segments },
     })
 }
 
+fn trailing_group(tokens: &[String], line: usize) -> Result<(usize, Option<String>), TimingError> {
+    let Some(index) = tokens.iter().position(|token| token == "group") else {
+        return Ok((tokens.len(), None));
+    };
+    let Some(value) = tokens.get(index + 1) else {
+        return Err(dsl_error(line, "参数 `group` 缺少值"));
+    };
+    if index + 2 != tokens.len() {
+        return Err(dsl_error(line, "参数 `group` 必须位于行尾且不能重复"));
+    }
+    Ok((index, Some(value.to_owned())))
+}
+
 fn parse_marker(tokens: &[String], line: usize) -> Result<Marker, TimingError> {
+    reject_extra(tokens, 3, line, "mark")?;
     let label = required(tokens, 1, line, "标记名称")?.to_owned();
     let at = required(tokens, 2, line, "标记时间")?
         .strip_prefix('@')
@@ -283,6 +380,18 @@ fn parse_marker(tokens: &[String], line: usize) -> Result<Marker, TimingError> {
         at: parse_number(at, line, "标记时间")?,
         label: Some(label),
     })
+}
+
+fn reject_extra(
+    tokens: &[String],
+    expected: usize,
+    line: usize,
+    statement: &str,
+) -> Result<(), TimingError> {
+    if tokens.len() > expected {
+        return Err(dsl_error(line, &format!("`{statement}` 语句包含多余内容")));
+    }
+    Ok(())
 }
 
 fn required<'a>(
@@ -648,5 +757,111 @@ signals:
         let error = parse(source).expect_err("YAML must not bypass model validation");
 
         assert!(error.to_string().contains("严格递增"));
+    }
+
+    #[test]
+    fn accepts_dsl_version_one_and_rejects_unknown_versions() {
+        let valid = "timing 1\nsignal READY low@0 high@1\n";
+        let unsupported = "timing 2\nsignal READY low@0 high@1\n";
+
+        assert!(parse(valid).is_ok());
+        let error = parse(unsupported).expect_err("unknown DSL versions must be rejected");
+        assert!(error.to_string().contains("第 1 行"));
+        assert!(error.to_string().contains("不支持 DSL 版本 `2`"));
+    }
+
+    #[test]
+    fn rejects_unknown_clock_parameters_instead_of_using_defaults() {
+        let source = "clock CLK peroid 4 cycles 8\n";
+
+        let error = parse(source).expect_err("misspelled parameters must be rejected");
+
+        assert!(error.to_string().contains("第 1 行"));
+        assert!(error.to_string().contains("未知时钟参数 `peroid`"));
+    }
+
+    #[test]
+    fn rejects_repeated_document_declarations() {
+        let source = "title First\ntitle Second\nsignal READY low@0 high@1\n";
+
+        let error = parse(source).expect_err("repeated titles must be rejected");
+
+        assert!(error.to_string().contains("第 2 行"));
+        assert!(error.to_string().contains("title 只能声明一次"));
+    }
+
+    #[test]
+    fn rejects_repeated_clock_parameters() {
+        let source = "clock CLK cycles 4 cycles 8\n";
+
+        let error = parse(source).expect_err("repeated parameters must be rejected");
+
+        assert!(error.to_string().contains("时钟参数 `cycles` 不能重复"));
+    }
+
+    #[test]
+    fn requires_clock_cycles_but_keeps_period_and_start_defaults() {
+        let missing = parse("clock CLK period 4\n").expect_err("cycles is required");
+        assert!(missing.to_string().contains("缺少必填参数 `cycles`"));
+
+        let diagram = parse("clock CLK cycles 3\n").expect("other clock options have defaults");
+        assert!(matches!(
+            diagram.signals[0].kind,
+            SignalKind::Clock {
+                period: 2.0,
+                cycles: 3,
+                start: 0.0
+            }
+        ));
+    }
+
+    #[test]
+    fn supports_quotes_and_backslashes_inside_quoted_text() {
+        let source = r#"title "SPI \"Read\" \\ Path"
+signal READY low@0 high@1
+"#;
+
+        let diagram = parse(source).expect("escaped text should parse");
+
+        assert_eq!(diagram.title.as_deref(), Some("SPI \"Read\" \\ Path"));
+    }
+
+    #[test]
+    fn reports_misspelled_first_statements_as_dsl_errors() {
+        let error = parse("clok CLK cycles 8\n").expect_err("misspelled DSL must fail");
+
+        assert!(error.to_string().contains("第 1 行"));
+        assert!(error.to_string().contains("未知语句 `clok`"));
+    }
+
+    #[test]
+    fn rejects_group_without_a_value() {
+        let error = parse("signal READY low@0 group\n").expect_err("group needs a value");
+
+        assert!(error.to_string().contains("参数 `group` 缺少值"));
+    }
+
+    #[test]
+    fn requires_spaces_in_titles_to_be_quoted() {
+        let error = parse("title Demo Board\nsignal READY low@0\n")
+            .expect_err("unquoted title words must not be discarded");
+
+        assert!(error.to_string().contains("带空格的标题必须使用双引号"));
+    }
+
+    #[test]
+    fn rejects_extra_content_in_fixed_length_statements() {
+        for (source, statement) in [
+            ("timing 1 extra\nsignal A low@0\n", "timing"),
+            ("unit ns extra\nsignal A low@0\n", "unit"),
+            ("mark sample @1 extra\nsignal A low@0\n", "mark"),
+        ] {
+            let error = parse(source).expect_err("extra content must not be ignored");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("`{statement}` 语句包含多余内容"))
+            );
+        }
     }
 }

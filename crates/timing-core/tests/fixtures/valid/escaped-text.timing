@@ -1,0 +1,5 @@
+timing 1
+title "SPI \"Read\" \\ Path"
+signal READY low@0 high@1
+bus DATA "value \"A\""@0..1
+

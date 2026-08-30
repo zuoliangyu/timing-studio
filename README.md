@@ -2,6 +2,8 @@
 
 Timing Studio 是一个运行在浏览器中的数字时序图编辑器。Rust 核心负责解析、校验、布局和 SVG 生成，通过 WebAssembly 在本地浏览器执行；输入数据不会上传到服务器。
 
+使用说明：[用户手册](docs/user-guide.md) · [DSL v1 规范](docs/dsl.md)
+
 ## 当前功能
 
 - 简洁 DSL 或 YAML/JSON 描述高低电平、时钟和总线
@@ -9,7 +11,7 @@ Timing Studio 是一个运行在浏览器中的数字时序图编辑器。Rust �
 - 时间标记和信号分组
 - 浅色、深色主题
 - 40%～200% 波形预览缩放与适应窗口
-- 导入 YAML/JSON，导出 SVG 和 2 倍分辨率 PNG
+- 导入 `.timing`、YAML/JSON，导出 SVG 和 2 倍分辨率 PNG
 - 浏览器本地保存最近一次编辑
 - 时间顺序、区间重叠和非有限数值校验
 - 错误行高亮与点击跳转
@@ -33,6 +35,7 @@ npm run dev
 人工编写推荐使用简洁 DSL：
 
 ```text
+timing 1
 title "SPI Flash 读取"
 unit cycle
 clock SCLK period 2 cycles 8 start 1 group SPI
@@ -62,6 +65,8 @@ signals:
 markers:
   - { at: 9, label: "采样" }
 ```
+
+简洁 DSL 的完整语法、默认值和错误规则见 [DSL v1 规范](docs/dsl.md)。
 
 ## 架构
 

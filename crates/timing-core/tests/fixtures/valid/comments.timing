@@ -1,0 +1,5 @@
+# 整行注释不会参与解析
+timing 1
+title "Hash # stays" # 引号外可以写行尾注释
+signal READY low@0 high@1 # 信号说明
+

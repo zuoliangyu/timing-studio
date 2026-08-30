@@ -1,0 +1,4 @@
+title First
+title Second
+signal READY low@0 high@1
+
