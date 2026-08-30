@@ -10,7 +10,10 @@ Timing Studio 是一个运行在浏览器中的数字时序图编辑器。Rust �
 
 - `积木`、`DSL`、`YAML` 三种并列编辑模式
 - 可编辑的时钟、数字信号、总线、时间标记、区间和因果箭头积木
+- 带迷你波形的信号模板，以及时钟复位、Ready/Valid、SPI 常用片段追加
+- 信号多选分组、组重命名/折叠/整组移动，以及 SVG/TikZ 分组括号
 - 信号筛选、紧凑视图，以及信号、状态点、总线片段和论文标注排序
+- 可定位到整图、指定信号或指定分组下方的区间/建立/保持时间标注
 - 建立时间、保持时间、因果箭头，以及区间标签数学下标
 - DSL 与 YAML 通过同一个 Rust `Diagram` 双向转换
 - 论文风格的白底黑线实时 SVG 预览
@@ -64,9 +67,9 @@ clock SCLK period 2 cycles 8 start 1 group SPI
 signal CS_N high@0 low@1 high@17 group SPI
 bus DATA "0x9F"@1..9 "ADDR"@9..17 group SPI
 mark "采样" @9
-span 1..9 "命令阶段"
-setup 8..9 "建立时间 T_setup"
-hold 9..10 "保持时间 T_hold"
+span 1..9 "命令阶段" under group SPI
+setup 8..9 "建立时间 T_setup" under signal MOSI
+hold 9..10 "保持时间 T_hold" under signal MISO
 arrow CS_N@1 -> DATA@9 "命令完成"
 ```
 

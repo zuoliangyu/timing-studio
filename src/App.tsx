@@ -1,7 +1,7 @@
 import {
   ArrowDown, ArrowDownUp, ArrowLeft, ArrowRight, ArrowUp, Blocks, Bus, Check, ChevronDown,
   Clock3, Copy, Download, FileCode2, FileDown, FileText, FileUp, GripVertical,
-  Highlighter, ImageDown, Maximize2, MoveRight, Plus, Radio, Redo2, RotateCcw,
+  Highlighter, ImageDown, Layers3, Maximize2, MoveRight, Plus, Radio, Redo2, RotateCcw,
   Rows3, Search, Timer, Trash2, Undo2, Zap, ZoomIn, ZoomOut,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -18,12 +18,13 @@ type Signal = {
   digital?: { points: { at: number; value: string }[] };
   bus?: { segments: { from: number; to: number; value: string }[] };
 };
+type SpanTarget = { signal: string } | { group: string };
 type Diagram = {
   title?: string;
   unit: string;
   signals: Signal[];
   markers: { at: number; label?: string }[];
-  spans: { from: number; to: number; label: string; kind?: "interval" | "setup" | "hold" }[];
+  spans: { from: number; to: number; label: string; kind?: "interval" | "setup" | "hold"; under?: SpanTarget }[];
   arrows: { from: { signal: string; at: number }; to: { signal: string; at: number }; label?: string }[];
 };
 
@@ -42,6 +43,10 @@ function App() {
   const [validating, setValidating] = useState(true);
   const [ready, setReady] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
+  const [signalMenuOpen, setSignalMenuOpen] = useState(false);
+  const [snippetMenuOpen, setSnippetMenuOpen] = useState(false);
+  const [spanMenuOpen, setSpanMenuOpen] = useState(false);
+  const [groupPanelOpen, setGroupPanelOpen] = useState(false);
   const [selectedSignal, setSelectedSignal] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [exportingPng, setExportingPng] = useState(false);
@@ -153,23 +158,62 @@ function App() {
     }
   };
 
-  const uniqueName = (base: string) => {
-    const names = new Set(diagram?.signals.map((signal) => signal.name));
+  const uniqueName = (base: string, signals = diagram?.signals ?? []) => {
+    const names = new Set(signals.map((signal) => signal.name));
     if (!names.has(base)) return base;
     let suffix = 2;
     while (names.has(`${base}_${suffix}`)) suffix += 1;
     return `${base}_${suffix}`;
   };
 
-  const addSignal = (kind: "clock" | "digital" | "bus") => mutateDiagram((draft) => {
-    const name = uniqueName(kind === "clock" ? "CLK" : kind === "bus" ? "DATA" : "SIGNAL");
-    const signal: Signal = kind === "clock"
+  const uniqueGroupName = (base: string, signals: Signal[]) => {
+    const groups = new Set(signals.flatMap((signal) => signal.group ? [signal.group] : []));
+    if (!groups.has(base)) return base;
+    let suffix = 2;
+    while (groups.has(`${base}_${suffix}`)) suffix += 1;
+    return `${base}_${suffix}`;
+  };
+
+  const addSignalTemplate = (template: "clock" | "low" | "high" | "pulse" | "negative-pulse" | "bus") => mutateDiagram((draft) => {
+    const name = uniqueName(template === "clock" ? "CLK" : template === "bus" ? "DATA" : "SIGNAL", draft.signals);
+    const signal: Signal = template === "clock"
       ? { name, clock: { period: 2, cycles: 4, start: 0 } }
-      : kind === "bus"
+      : template === "bus"
         ? { name, bus: { segments: [{ from: 0, to: 4, value: "VALUE" }] } }
-        : { name, digital: { points: [{ at: 0, value: "low" }, { at: 1, value: "high" }] } };
+        : {
+          name,
+          digital: {
+            points: template === "low" ? [{ at: 0, value: "low" }]
+              : template === "high" ? [{ at: 0, value: "high" }]
+                : template === "negative-pulse"
+                  ? [{ at: 0, value: "high" }, { at: 1, value: "low" }, { at: 3, value: "high" }]
+                  : [{ at: 0, value: "low" }, { at: 1, value: "high" }, { at: 3, value: "low" }],
+          },
+        };
     draft.signals.push(signal);
     setSelectedSignal(name);
+  });
+
+  const addSnippet = (kind: "clock-reset" | "handshake" | "spi") => mutateDiagram((draft) => {
+    const group = uniqueGroupName(kind === "clock-reset" ? "时序" : kind === "handshake" ? "握手" : "SPI", draft.signals);
+    const append = (base: string, definition: Omit<Signal, "name" | "group">) => {
+      const name = uniqueName(base, draft.signals);
+      draft.signals.push({ name, group, ...definition });
+      return name;
+    };
+    if (kind === "clock-reset") {
+      append("CLK", { clock: { period: 2, cycles: 6, start: 0 } });
+      append("RESET_N", { digital: { points: [{ at: 0, value: "low" }, { at: 2, value: "high" }] } });
+    } else if (kind === "handshake") {
+      append("VALID", { digital: { points: [{ at: 0, value: "low" }, { at: 2, value: "high" }, { at: 8, value: "low" }] } });
+      append("READY", { digital: { points: [{ at: 0, value: "low" }, { at: 4, value: "high" }, { at: 8, value: "low" }] } });
+      append("DATA", { bus: { segments: [{ from: 2, to: 5, value: "A5" }, { from: 5, to: 8, value: "3C" }] } });
+    } else {
+      append("SCLK", { clock: { period: 2, cycles: 8, start: 1 } });
+      append("CS_N", { digital: { points: [{ at: 0, value: "high" }, { at: 1, value: "low" }, { at: 17, value: "high" }] } });
+      append("MOSI", { bus: { segments: [{ from: 1, to: 9, value: "0x9F" }, { from: 9, to: 17, value: "ADDR" }] } });
+      append("MISO", { bus: { segments: [{ from: 1, to: 9, value: "Z" }, { from: 9, to: 17, value: "0xEF" }] } });
+    }
   });
 
   const addSpan = (kind: "interval" | "setup" | "hold" = "interval") => mutateDiagram((draft) => draft.spans.push({
@@ -177,6 +221,9 @@ function App() {
     to: 4,
     label: kind === "setup" ? "建立时间 T_setup" : kind === "hold" ? "保持时间 T_hold" : "时间区间",
     ...(kind === "interval" ? {} : { kind }),
+    ...(selectedSignal && draft.signals.some((signal) => signal.name === selectedSignal)
+      ? { under: { signal: selectedSignal } }
+      : {}),
   }));
   const addArrow = () => mutateDiagram((draft) => {
     const from = draft.signals[0]?.name;
@@ -185,14 +232,20 @@ function App() {
     draft.arrows.push({ from: { signal: from, at: 1 }, to: { signal: to, at: 2 }, label: "因果关系" });
   });
   const removeSignal = (name: string) => mutateDiagram((draft) => {
+    const removedGroup = draft.signals.find((signal) => signal.name === name)?.group;
     draft.signals = draft.signals.filter((signal) => signal.name !== name);
     draft.arrows = draft.arrows.filter((arrow) => arrow.from.signal !== name && arrow.to.signal !== name);
+    for (const span of draft.spans) {
+      if (span.under && "signal" in span.under && span.under.signal === name) delete span.under;
+      if (removedGroup && span.under && "group" in span.under && span.under.group === removedGroup
+        && !draft.signals.some((signal) => signal.group === removedGroup)) delete span.under;
+    }
     setSelectedSignal(null);
   });
 
   const duplicateSignal = (index: number) => mutateDiagram((draft) => {
     const copy = structuredClone(draft.signals[index]);
-    copy.name = uniqueName(`${copy.name}_副本`);
+    copy.name = uniqueName(`${copy.name}_副本`, draft.signals);
     draft.signals.splice(index + 1, 0, copy);
   });
 
@@ -336,14 +389,37 @@ function App() {
     </header>
 
     <nav className={`command-shelf ${editorMode === "blocks" ? "is-active" : ""}`} aria-label="快捷积木栏">
-      <span><Blocks size={14} />插入积木</span>
-      <button onClick={() => { setEditorMode("blocks"); addSignal("clock"); }}><Clock3 size={15} />时钟</button>
-      <button onClick={() => { setEditorMode("blocks"); addSignal("digital"); }}><Radio size={15} />数字信号</button>
-      <button onClick={() => { setEditorMode("blocks"); addSignal("bus"); }}><Bus size={15} />总线</button>
+      <span><Blocks size={14} />积木</span>
+      <div className="insert-picker">
+        <button aria-expanded={signalMenuOpen} aria-haspopup="menu" onClick={() => { setEditorMode("blocks"); setSignalMenuOpen((value) => !value); setSnippetMenuOpen(false); setSpanMenuOpen(false); }}><Plus size={15} />插入信号<ChevronDown size={13} /></button>
+        {signalMenuOpen && <div className="insert-menu signal-template-menu" role="menu">
+          <button role="menuitem" onClick={() => { addSignalTemplate("clock"); setSignalMenuOpen(false); }}><MiniWave kind="clock" /><span><strong>时钟</strong><small>连续周期翻转</small></span></button>
+          <button role="menuitem" onClick={() => { addSignalTemplate("pulse"); setSignalMenuOpen(false); }}><MiniWave kind="pulse" /><span><strong>正脉冲</strong><small>低电平中出现高脉冲</small></span></button>
+          <button role="menuitem" onClick={() => { addSignalTemplate("negative-pulse"); setSignalMenuOpen(false); }}><MiniWave kind="negative-pulse" /><span><strong>负脉冲</strong><small>高电平中出现低脉冲</small></span></button>
+          <button role="menuitem" onClick={() => { addSignalTemplate("low"); setSignalMenuOpen(false); }}><MiniWave kind="low" /><span><strong>恒定低电平</strong><small>初始值为 LOW</small></span></button>
+          <button role="menuitem" onClick={() => { addSignalTemplate("high"); setSignalMenuOpen(false); }}><MiniWave kind="high" /><span><strong>恒定高电平</strong><small>初始值为 HIGH</small></span></button>
+          <button role="menuitem" onClick={() => { addSignalTemplate("bus"); setSignalMenuOpen(false); }}><MiniWave kind="bus" /><span><strong>总线</strong><small>带一个数据片段</small></span></button>
+        </div>}
+      </div>
+      <div className="insert-picker">
+        <button aria-expanded={snippetMenuOpen} aria-haspopup="menu" onClick={() => { setEditorMode("blocks"); setSnippetMenuOpen((value) => !value); setSignalMenuOpen(false); setSpanMenuOpen(false); }}><Layers3 size={15} />插入常用片段<ChevronDown size={13} /></button>
+        {snippetMenuOpen && <div className="insert-menu snippet-menu" role="menu">
+          <button role="menuitem" onClick={() => { addSnippet("clock-reset"); setSnippetMenuOpen(false); }}><Clock3 size={18} /><span><strong>时钟 + 复位</strong><small>CLK 与低有效复位</small></span></button>
+          <button role="menuitem" onClick={() => { addSnippet("handshake"); setSnippetMenuOpen(false); }}><MoveRight size={18} /><span><strong>Ready / Valid 握手</strong><small>VALID、READY 与 DATA</small></span></button>
+          <button role="menuitem" onClick={() => { addSnippet("spi"); setSnippetMenuOpen(false); }}><Bus size={18} /><span><strong>SPI 读取</strong><small>SCLK、片选与双向数据</small></span></button>
+        </div>}
+      </div>
+      <button aria-expanded={groupPanelOpen} onClick={() => { setEditorMode("blocks"); setGroupPanelOpen((value) => !value); }}><Layers3 size={15} />分组操作</button>
+      <i aria-hidden="true" />
       <button onClick={() => { setEditorMode("blocks"); mutateDiagram((draft) => draft.markers.push({ at: 1, label: "标记" })); }}><Highlighter size={15} />时间标记</button>
-      <button onClick={() => { setEditorMode("blocks"); addSpan(); }}><Highlighter size={15} />区间标注</button>
-      <button onClick={() => { setEditorMode("blocks"); addSpan("setup"); }}><Timer size={15} />建立时间</button>
-      <button onClick={() => { setEditorMode("blocks"); addSpan("hold"); }}><Timer size={15} />保持时间</button>
+      <div className="insert-picker">
+        <button aria-expanded={spanMenuOpen} aria-haspopup="menu" onClick={() => { setEditorMode("blocks"); setSpanMenuOpen((value) => !value); setSignalMenuOpen(false); setSnippetMenuOpen(false); }}><Timer size={15} />插入区间<ChevronDown size={13} /></button>
+        {spanMenuOpen && <div className="insert-menu compact-menu" role="menu">
+          <button role="menuitem" onClick={() => { addSpan(); setSpanMenuOpen(false); }}>区间箭头</button>
+          <button role="menuitem" onClick={() => { addSpan("setup"); setSpanMenuOpen(false); }}>建立时间</button>
+          <button role="menuitem" onClick={() => { addSpan("hold"); setSpanMenuOpen(false); }}>保持时间</button>
+        </div>}
+      </div>
       <button onClick={() => { setEditorMode("blocks"); addArrow(); }}><MoveRight size={15} />因果箭头</button>
     </nav>
 
@@ -360,7 +436,7 @@ function App() {
             <button className="icon-control subtle" title="恢复闸门示例" onClick={() => loadExample(defaultSource)}><RotateCcw size={15} /></button>
           </div>
         </div>
-        {editorMode === "blocks" && diagram ? <BlockEditor diagram={diagram} selected={selectedSignal} onSelect={setSelectedSignal} mutate={mutateDiagram} removeSignal={removeSignal} duplicateSignal={duplicateSignal} moveSignal={moveSignal} editError={editError} /> : <>
+        {editorMode === "blocks" && diagram ? <BlockEditor diagram={diagram} selected={selectedSignal} onSelect={setSelectedSignal} mutate={mutateDiagram} removeSignal={removeSignal} duplicateSignal={duplicateSignal} moveSignal={moveSignal} editError={editError} groupPanelOpen={groupPanelOpen} onCloseGroupPanel={() => setGroupPanelOpen(false)} /> : <>
           <div className="editor-wrap">
             <div ref={lineNumbersRef} className="line-numbers" aria-hidden="true">{source.split("\n").map((_, index) => <span className={errorLine === index + 1 ? "line-error" : ""} key={index}>{index + 1}</span>)}</div>
             <textarea ref={editorRef} value={source} onFocus={() => { textEditStartRef.current = { source, format, mode: editorMode }; }} onBlur={() => {
@@ -402,7 +478,11 @@ function App() {
 
 type MutateDiagram = (mutate: (draft: Diagram) => void) => boolean;
 
-function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplicateSignal, moveSignal, editError }: {
+function MiniWave({ kind }: { kind: "clock" | "pulse" | "negative-pulse" | "low" | "high" | "bus" }) {
+  return <span className={`mini-wave ${kind}`} aria-hidden="true"><i /><i /><i /><i /></span>;
+}
+
+function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplicateSignal, moveSignal, editError, groupPanelOpen, onCloseGroupPanel }: {
   diagram: Diagram;
   selected: string | null;
   onSelect: (name: string) => void;
@@ -411,12 +491,23 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
   duplicateSignal: (index: number) => boolean;
   moveSignal: (index: number, direction: number) => boolean;
   editError: string | null;
+  groupPanelOpen: boolean;
+  onCloseGroupPanel: () => void;
 }) {
   const invalidSignal = editError?.match(/第\s*(\d+)\s*个信号/)?.[1];
   const invalidIndex = invalidSignal ? Number(invalidSignal) - 1 : -1;
   const [dragging, setDragging] = useState<number | null>(null);
   const [filter, setFilter] = useState("");
   const [compact, setCompact] = useState(false);
+  const [selectedNames, setSelectedNames] = useState<Set<string>>(() => new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const [groupDraft, setGroupDraft] = useState("");
+  useEffect(() => {
+    const names = new Set(diagram.signals.map((signal) => signal.name));
+    setSelectedNames((current) => new Set([...current].filter((name) => names.has(name))));
+    const groups = new Set(diagram.signals.flatMap((signal) => signal.group ? [signal.group] : []));
+    setCollapsedGroups((current) => new Set([...current].filter((name) => groups.has(name))));
+  }, [diagram.signals]);
   const normalizedFilter = filter.trim().toLocaleLowerCase();
   const visibleSignals = diagram.signals
     .map((signal, index) => ({ signal, index }))
@@ -429,6 +520,80 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
     });
     setDragging(null);
   };
+  const toggleSelected = (name: string, checked: boolean) => setSelectedNames((current) => {
+    const next = new Set(current);
+    if (checked) next.add(name); else next.delete(name);
+    return next;
+  });
+  const applyGroup = () => {
+    const group = groupDraft.trim();
+    if (!group || selectedNames.size === 0) return;
+    if (mutate((draft) => {
+      for (const signal of draft.signals) {
+        if (selectedNames.has(signal.name)) signal.group = group;
+      }
+    })) {
+      setSelectedNames(new Set());
+      setGroupDraft("");
+      onCloseGroupPanel();
+    }
+  };
+  const renameGroup = (previous: string, nextValue: string) => {
+    const next = nextValue.trim();
+    if (!next) return false;
+    if (next === previous) return true;
+    const changed = mutate((draft) => {
+      for (const signal of draft.signals) if (signal.group === previous) signal.group = next;
+      for (const span of draft.spans) {
+        if (span.under && "group" in span.under && span.under.group === previous) span.under.group = next;
+      }
+    });
+    if (changed) setCollapsedGroups((current) => {
+      const updated = new Set(current);
+      if (updated.delete(previous)) updated.add(next);
+      return updated;
+    });
+    return changed;
+  };
+  const ungroup = (group: string) => mutate((draft) => {
+    for (const signal of draft.signals) if (signal.group === group) delete signal.group;
+    for (const span of draft.spans) {
+      if (span.under && "group" in span.under && span.under.group === group) delete span.under;
+    }
+  });
+  const moveGroup = (group: string, direction: number) => mutate((draft) => {
+    const members = draft.signals.filter((signal) => signal.group === group);
+    if (members.length === 0) return;
+    const memberNames = new Set(members.map((signal) => signal.name));
+    const first = draft.signals.findIndex((signal) => memberNames.has(signal.name));
+    const last = draft.signals.map((signal) => memberNames.has(signal.name)).lastIndexOf(true);
+    const remaining = draft.signals.filter((signal) => !memberNames.has(signal.name));
+    if (direction < 0) {
+      if (first === 0) return;
+      const previous = draft.signals[first - 1];
+      let insertAt = remaining.findIndex((signal) => signal.name === previous.name);
+      if (previous.group) {
+        const firstPrevious = remaining.findIndex((signal) => signal.group === previous.group);
+        if (firstPrevious >= 0) insertAt = firstPrevious;
+      }
+      remaining.splice(Math.max(0, insertAt), 0, ...members);
+    } else {
+      if (last === draft.signals.length - 1) return;
+      const nextSignal = draft.signals[last + 1];
+      let insertAfter = remaining.findIndex((signal) => signal.name === nextSignal.name);
+      if (nextSignal.group) {
+        const groupIndices = remaining.map((signal, index) => signal.group === nextSignal.group ? index : -1).filter((index) => index >= 0);
+        insertAfter = groupIndices.at(-1) ?? insertAfter;
+      }
+      remaining.splice(insertAfter + 1, 0, ...members);
+    }
+    draft.signals = remaining;
+  });
+  const toggleGroup = (group: string) => setCollapsedGroups((current) => {
+    const next = new Set(current);
+    if (next.has(group)) next.delete(group); else next.add(group);
+    return next;
+  });
   return <div className={`block-editor ${compact ? "is-compact" : ""}`}>
     <section className="diagram-fields">
       <label><span>图表标题</span><EditInput value={diagram.title ?? ""} onCommit={(value) => mutate((draft) => { draft.title = value || undefined; })} /></label>
@@ -439,28 +604,46 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
     <section className="block-tools" aria-label="信号视图工具">
       <label className="signal-filter"><Search size={14} /><input type="search" aria-label="筛选信号" placeholder="筛选名称或分组" value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
       <button className={compact ? "active" : ""} aria-pressed={compact} onClick={() => setCompact((value) => !value)}><Rows3 size={14} />紧凑视图</button>
-      <span>显示 {visibleSignals.length} / {diagram.signals.length} 条信号</span>
+      <span>{selectedNames.size > 0 ? `已选 ${selectedNames.size} 条 · ` : ""}显示 {visibleSignals.length} / {diagram.signals.length} 条信号</span>
     </section>
 
+    {groupPanelOpen && <section className="group-panel" aria-label="批量分组">
+      <strong>将已选信号加入分组</strong>
+      <input aria-label="组名" value={groupDraft} placeholder="输入新组名或已有组名" onChange={(event) => setGroupDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyGroup(); }} />
+      <button className="apply-group" disabled={selectedNames.size === 0 || !groupDraft.trim()} onClick={applyGroup}>应用分组</button>
+      <button className="icon-control" title="关闭分组操作" onClick={onCloseGroupPanel}>×</button>
+    </section>}
+
     <div className="lane-list">
-      {visibleSignals.map(({ signal, index }) => <SignalLane
-        key={signal.name}
-        signal={signal}
-        index={index}
-        active={selected === signal.name}
-        onSelect={() => onSelect(signal.name)}
-        mutate={mutate}
-        onRemove={() => removeSignal(signal.name)}
-        onDuplicate={() => duplicateSignal(index)}
-        onMove={(direction) => moveSignal(index, direction)}
-        canMoveUp={index > 0}
-        canMoveDown={index < diagram.signals.length - 1}
-        validationError={invalidIndex === index ? editError : null}
-        dragging={dragging === index}
-        onDragStart={() => setDragging(index)}
-        onDragEnd={() => setDragging(null)}
-        onDrop={() => dropSignal(index)}
-      />)}
+      {visibleSignals.flatMap(({ signal, index }, visibleIndex) => {
+        const previousGroup = visibleSignals[visibleIndex - 1]?.signal.group;
+        const showGroup = Boolean(signal.group && signal.group !== previousGroup);
+        const collapsed = Boolean(signal.group && collapsedGroups.has(signal.group));
+        const groupCount = signal.group ? diagram.signals.filter((item) => item.group === signal.group).length : 0;
+        return [
+          showGroup && signal.group ? <SignalGroupHeader key={`group-${signal.group}-${index}`} group={signal.group} count={groupCount} collapsed={collapsed} onToggle={() => toggleGroup(signal.group!)} onRename={(next) => renameGroup(signal.group!, next)} onUngroup={() => ungroup(signal.group!)} onMove={(direction) => moveGroup(signal.group!, direction)} canMoveUp={index > 0} canMoveDown={diagram.signals.map((item) => item.group === signal.group).lastIndexOf(true) < diagram.signals.length - 1} /> : null,
+          collapsed ? null : <SignalLane
+            key={signal.name}
+            signal={signal}
+            index={index}
+            active={selected === signal.name}
+            checked={selectedNames.has(signal.name)}
+            onCheck={(checked) => toggleSelected(signal.name, checked)}
+            onSelect={() => onSelect(signal.name)}
+            mutate={mutate}
+            onRemove={() => removeSignal(signal.name)}
+            onDuplicate={() => duplicateSignal(index)}
+            onMove={(direction) => moveSignal(index, direction)}
+            canMoveUp={index > 0}
+            canMoveDown={index < diagram.signals.length - 1}
+            validationError={invalidIndex === index ? editError : null}
+            dragging={dragging === index}
+            onDragStart={() => setDragging(index)}
+            onDragEnd={() => setDragging(null)}
+            onDrop={() => dropSignal(index)}
+          />,
+        ];
+      })}
     </div>
 
     <AnnotationEditor diagram={diagram} mutate={mutate} />
@@ -468,10 +651,35 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
   </div>;
 }
 
-function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDuplicate, onMove, canMoveUp, canMoveDown, validationError, dragging, onDragStart, onDragEnd, onDrop }: {
+function SignalGroupHeader({ group, count, collapsed, onToggle, onRename, onUngroup, onMove, canMoveUp, canMoveDown }: {
+  group: string;
+  count: number;
+  collapsed: boolean;
+  onToggle: () => void;
+  onRename: (value: string) => boolean;
+  onUngroup: () => boolean;
+  onMove: (direction: number) => boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+}) {
+  return <section className="signal-group-header" role="group" aria-label={`信号组 ${group}`}>
+    <button className="group-collapse" title={collapsed ? "展开组" : "折叠组"} onClick={onToggle}><ChevronDown className={collapsed ? "collapsed" : ""} size={15} /></button>
+    <EditInput ariaLabel={`组名 ${group}`} value={group} onCommit={onRename} />
+    <small>{count} 条信号</small>
+    <div className="group-actions">
+      <button title="整组上移" disabled={!canMoveUp} onClick={() => onMove(-1)}><ArrowUp size={13} /></button>
+      <button title="整组下移" disabled={!canMoveDown} onClick={() => onMove(1)}><ArrowDown size={13} /></button>
+      <button title="取消分组" onClick={onUngroup}><Layers3 size={13} /></button>
+    </div>
+  </section>;
+}
+
+function SignalLane({ signal, index, active, checked, onCheck, onSelect, mutate, onRemove, onDuplicate, onMove, canMoveUp, canMoveDown, validationError, dragging, onDragStart, onDragEnd, onDrop }: {
   signal: Signal;
   index: number;
   active: boolean;
+  checked: boolean;
+  onCheck: (checked: boolean) => void;
   onSelect: () => void;
   mutate: MutateDiagram;
   onRemove: () => boolean;
@@ -490,11 +698,22 @@ function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDupli
   const update = (change: (draft: Signal) => void) => mutate((draft) => {
     const current = draft.signals[index];
     const previousName = current.name;
+    const previousGroup = current.group;
     change(current);
-    if (current.name === previousName) return;
-    for (const arrow of draft.arrows) {
-      if (arrow.from.signal === previousName) arrow.from.signal = current.name;
-      if (arrow.to.signal === previousName) arrow.to.signal = current.name;
+    if (current.name !== previousName) {
+      for (const arrow of draft.arrows) {
+        if (arrow.from.signal === previousName) arrow.from.signal = current.name;
+        if (arrow.to.signal === previousName) arrow.to.signal = current.name;
+      }
+      for (const span of draft.spans) {
+        if (span.under && "signal" in span.under && span.under.signal === previousName) span.under.signal = current.name;
+      }
+    }
+    if (previousGroup && previousGroup !== current.group
+      && !draft.signals.some((item) => item.group === previousGroup)) {
+      for (const span of draft.spans) {
+        if (span.under && "group" in span.under && span.under.group === previousGroup) delete span.under;
+      }
     }
   });
   const changeKind = (next: string) => update((draft) => {
@@ -510,7 +729,10 @@ function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDupli
     : validationError?.includes("时钟") ? "values"
       : validationError?.includes("时间") || validationError?.includes("总线") ? "values" : null;
   return <article aria-label={`信号 ${signal.name}`} aria-current={active ? "true" : undefined} className={`signal-lane ${active ? "active" : ""} ${validationError ? "invalid" : ""} ${dragging ? "dragging" : ""}`} onClick={onSelect} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); onDrop(); }}>
-    <div className={`lane-kind ${kind}`} draggable title="拖动排序" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; onDragStart(); }} onDragEnd={onDragEnd}><Icon size={17} /><span>{index + 1}</span></div>
+    <div className={`lane-kind ${kind}`} draggable title="拖动排序" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; onDragStart(); }} onDragEnd={onDragEnd}>
+      <input type="checkbox" aria-label={`选择信号 ${signal.name}`} checked={checked} onClick={(event) => event.stopPropagation()} onChange={(event) => onCheck(event.target.checked)} />
+      <Icon size={17} /><span>{index + 1}</span>
+    </div>
     <div className={`lane-identity ${errorArea === "identity" ? "field-invalid" : ""}`}>
       <label><span>名称</span><EditInput value={signal.name} onCommit={(value) => update((draft) => { draft.name = value; })} /></label>
       <label><span>分组</span><EditInput value={signal.group ?? ""} placeholder="无分组" onCommit={(value) => update((draft) => { draft.group = value || undefined; })} /></label>
@@ -603,6 +825,7 @@ function BusFields({ signal, update }: { signal: Signal; update: (change: (draft
 }
 
 function AnnotationEditor({ diagram, mutate }: { diagram: Diagram; mutate: MutateDiagram }) {
+  const groups = [...new Set(diagram.signals.flatMap((signal) => signal.group ? [signal.group] : []))];
   const moveMarker = (index: number, direction: number) => mutate((draft) => {
     const target = index + direction;
     if (target < 0 || target >= draft.markers.length) return;
@@ -632,7 +855,7 @@ function AnnotationEditor({ diagram, mutate }: { diagram: Diagram; mutate: Mutat
           <button title="删除时间标记" onClick={() => mutate((draft) => { draft.markers.splice(index, 1); })}><Trash2 size={13} /></button>
         </div>
       </div>)}
-      {diagram.spans.map((span, index) => <div className="annotation-row" aria-label={`区间 ${span.label}`} key={`span-${index}`}>
+      {diagram.spans.map((span, index) => <div className="annotation-row span-row" aria-label={`区间 ${span.label}`} key={`span-${index}`}>
         <select aria-label="区间类型" value={span.kind ?? "interval"} onChange={(event) => mutate((draft) => {
           const kind = event.target.value as "interval" | "setup" | "hold";
           draft.spans[index].kind = kind === "interval" ? undefined : kind;
@@ -640,6 +863,18 @@ function AnnotationEditor({ diagram, mutate }: { diagram: Diagram; mutate: Mutat
         <EditInput value={span.label} placeholder="标签" onCommit={(value) => mutate((draft) => { draft.spans[index].label = value; })} />
         <NumberField label="开始" value={span.from} onCommit={(value) => mutate((draft) => { draft.spans[index].from = value; })} />
         <NumberField label="结束" value={span.to} onCommit={(value) => mutate((draft) => { draft.spans[index].to = value; })} />
+        <label className="placement-field"><span>位置</span><select aria-label="标注位置" value={span.under ? "signal" in span.under ? `signal:${span.under.signal}` : `group:${span.under.group}` : "diagram"} onChange={(event) => mutate((draft) => {
+          const separator = event.target.value.indexOf(":");
+          const kind = separator < 0 ? event.target.value : event.target.value.slice(0, separator);
+          const name = separator < 0 ? "" : event.target.value.slice(separator + 1);
+          if (kind === "signal") draft.spans[index].under = { signal: name };
+          else if (kind === "group") draft.spans[index].under = { group: name };
+          else delete draft.spans[index].under;
+        })}>
+          <option value="diagram">整张图底部</option>
+          <optgroup label="信号下方">{diagram.signals.map((signal) => <option value={`signal:${signal.name}`} key={`signal:${signal.name}`}>{signal.name}</option>)}</optgroup>
+          {groups.length > 0 && <optgroup label="分组下方">{groups.map((group) => <option value={`group:${group}`} key={`group:${group}`}>{group}</option>)}</optgroup>}
+        </select></label>
         <div className="annotation-actions">
           <button title="上移区间" disabled={index === 0} onClick={() => moveSpan(index, -1)}><ArrowUp size={13} /></button>
           <button title="下移区间" disabled={index === diagram.spans.length - 1} onClick={() => moveSpan(index, 1)}><ArrowDown size={13} /></button>
@@ -672,10 +907,10 @@ function NumberField({ label, value, integer = false, onCommit }: { label: strin
   }} /></label>;
 }
 
-function EditInput({ value, placeholder, compact = false, numeric = false, onCommit }: { value: string; placeholder?: string; compact?: boolean; numeric?: boolean; onCommit: (value: string) => boolean }) {
+function EditInput({ value, placeholder, ariaLabel, compact = false, numeric = false, onCommit }: { value: string; placeholder?: string; ariaLabel?: string; compact?: boolean; numeric?: boolean; onCommit: (value: string) => boolean }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
-  return <input className={compact ? "compact-input" : ""} type={numeric ? "number" : "text"} step="any" value={draft} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)} onBlur={() => {
+  return <input aria-label={ariaLabel} className={compact ? "compact-input" : ""} type={numeric ? "number" : "text"} step="any" value={draft} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)} onBlur={() => {
     if (draft === value) return;
     if (!onCommit(draft)) setDraft(value);
   }} onKeyDown={(event) => {

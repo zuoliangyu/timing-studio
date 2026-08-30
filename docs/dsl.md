@@ -159,9 +159,10 @@ clock     := "clock" name clock-option+
 signal    := "signal" name point+ ["group" name]
 bus       := "bus" name segment+ ["group" name]
 mark      := "mark" text marker-time
-span      := "span" time ".." time text
-setup     := "setup" time ".." time text
-hold      := "hold" time ".." time text
+span      := "span" time ".." time text [span-target]
+setup     := "setup" time ".." time text [span-target]
+hold      := "hold" time ".." time text [span-target]
+span-target := "under" ("signal" | "group") name
 arrow     := "arrow" name "@" time "->" name "@" time [text]
 point     := logic-at-time
 segment   := text-at-range
@@ -175,13 +176,14 @@ text-at-range := text "@" time ".." time
 ## `span`
 
 ```text
-span <开始>..<结束> <标签>
+span <开始>..<结束> <标签> [under signal|group <名称>]
 ```
 
-在所有信号下方绘制双向区间箭头，适合标注固定窗口、建立保持时间或有效区间。结束时间必须大于非负的开始时间，标签包含空格时必须使用双引号。
+绘制双向区间箭头，适合标注固定窗口、建立保持时间或有效区间。结束时间必须大于非负的开始时间，标签包含空格时必须使用双引号。省略 `under` 时标注位于整图底部；`under signal` 放在指定信号后，`under group` 放在该组最后一条信号后。引用的信号或分组必须存在。
 
 ```text
 span 2..14 "固定闸门时间 T_g"
+span 2..8 "握手窗口" under group HANDSHAKE
 ```
 
 区间标签支持轻量下标语法：`T_g` 表示单字符下标，`T_{gate}` 表示多字符下标。下标会直接写入自包含 SVG，不依赖 LaTeX 或 MathJax。
@@ -189,18 +191,18 @@ span 2..14 "固定闸门时间 T_g"
 ## `setup` 与 `hold`
 
 ```text
-setup <开始>..<结束> <标签>
-hold <开始>..<结束> <标签>
+setup <开始>..<结束> <标签> [under signal|group <名称>]
+hold <开始>..<结束> <标签> [under signal|group <名称>]
 ```
 
 两者与 `span` 使用相同的时间和标签规则，用不同线型表达建立时间与保持时间：
 
 ```text
-setup 1..2 "建立时间 T_setup"
-hold 2..3 "保持时间 T_hold"
+setup 1..2 "建立时间 T_setup" under signal DATA
+hold 2..3 "保持时间 T_hold" under group CTRL
 ```
 
-在 YAML 中，这三类标注都位于 `spans` 数组；`kind` 可为 `interval`、`setup` 或 `hold`。为兼容旧文件，省略 `kind` 时默认为 `interval`，普通区间序列化时也会省略该字段。
+在 YAML 中，这三类标注都位于 `spans` 数组；`kind` 可为 `interval`、`setup` 或 `hold`。可选位置写成 `under: { signal: DATA }` 或 `under: { group: CTRL }`。为兼容旧文件，省略 `kind` 时默认为 `interval`，普通区间序列化时也会省略该字段。
 
 ## `arrow`
 
@@ -251,5 +253,6 @@ DSL 错误包含源文件行号。以下情况会拒绝整份文档：
 - 引号未闭合或使用未知转义；
 - 时间为负数、非有限数或顺序错误；
 - 总线区间无效或重叠；
+- 区间标注的 `under` 引用不存在的信号或分组；
 - 因果箭头引用不存在的信号，或箭头时间无效；
 - 没有任何信号。

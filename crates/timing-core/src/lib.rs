@@ -82,6 +82,8 @@ pub struct Span {
     pub label: String,
     #[serde(default, skip_serializing_if = "SpanKind::is_interval")]
     pub kind: SpanKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under: Option<SpanTarget>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -97,6 +99,13 @@ impl SpanKind {
     fn is_interval(&self) -> bool {
         *self == Self::Interval
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum SpanTarget {
+    Signal { signal: String },
+    Group { group: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,7 +234,7 @@ pub fn to_dsl(diagram: &Diagram) -> Result<String, TimingError> {
             SpanKind::Setup => "setup",
             SpanKind::Hold => "hold",
         };
-        writeln!(
+        write!(
             output,
             "{keyword} {}..{} {}",
             format_number(span.from),
@@ -233,6 +242,14 @@ pub fn to_dsl(diagram: &Diagram) -> Result<String, TimingError> {
             quote_dsl(&span.label)
         )
         .unwrap();
+        if let Some(target) = &span.under {
+            let (kind, name) = match target {
+                SpanTarget::Signal { signal } => ("signal", signal),
+                SpanTarget::Group { group } => ("group", group),
+            };
+            write!(output, " under {kind} {}", quote_dsl(name)).unwrap();
+        }
+        output.push('\n');
     }
     for arrow in &diagram.arrows {
         write!(
@@ -564,21 +581,41 @@ fn parse_marker(tokens: &[String], line: usize) -> Result<Marker, TimingError> {
 }
 
 fn parse_span(tokens: &[String], line: usize, kind: SpanKind) -> Result<Span, TimingError> {
-    reject_extra(
-        tokens,
-        3,
-        line,
-        tokens.first().map(String::as_str).unwrap_or("span"),
-    )?;
+    let statement = tokens.first().map(String::as_str).unwrap_or("span");
+    if !matches!(tokens.len(), 3 | 6) {
+        return Err(dsl_error(
+            line,
+            &format!("`{statement}` 语句应写成范围、标签，以及可选的 under signal/group"),
+        ));
+    }
     let range = required(tokens, 1, line, "区间范围")?;
     let (from, to) = range
         .split_once("..")
         .ok_or_else(|| dsl_error(line, "区间范围应写成 2..14"))?;
+    let under = if tokens.len() == 6 {
+        if required(tokens, 3, line, "标注位置")? != "under" {
+            return Err(dsl_error(line, "区间标注位置应使用 `under`"));
+        }
+        let name = required(tokens, 5, line, "标注位置名称")?.to_owned();
+        Some(match required(tokens, 4, line, "标注位置类型")? {
+            "signal" => SpanTarget::Signal { signal: name },
+            "group" => SpanTarget::Group { group: name },
+            value => {
+                return Err(dsl_error(
+                    line,
+                    &format!("未知标注位置类型 `{value}`，应为 signal 或 group"),
+                ));
+            }
+        })
+    } else {
+        None
+    };
     Ok(Span {
         from: parse_number(from, line, "区间开始时间")?,
         to: parse_number(to, line, "区间结束时间")?,
         label: required(tokens, 2, line, "区间标签")?.to_owned(),
         kind,
+        under,
     })
 }
 
@@ -741,6 +778,26 @@ fn validate(diagram: &Diagram) -> Result<(), TimingError> {
             "区间标注必须有标签，且结束时间必须大于非负的开始时间".into(),
         ));
     }
+    for span in &diagram.spans {
+        match &span.under {
+            Some(SpanTarget::Signal { signal }) if !names.contains(signal.as_str()) => {
+                return Err(TimingError::Invalid(format!(
+                    "区间标注引用的信号 `{signal}` 不存在"
+                )));
+            }
+            Some(SpanTarget::Group { group })
+                if !diagram
+                    .signals
+                    .iter()
+                    .any(|signal| signal.group.as_deref() == Some(group.as_str())) =>
+            {
+                return Err(TimingError::Invalid(format!(
+                    "区间标注引用的分组 `{group}` 不存在"
+                )));
+            }
+            _ => {}
+        }
+    }
     for arrow in &diagram.arrows {
         if !names.contains(arrow.from.signal.as_str()) || !names.contains(arrow.to.signal.as_str())
         {
@@ -776,7 +833,22 @@ pub fn render_tikz(diagram: &Diagram) -> Result<String, TimingError> {
                 .flat_map(|arrow| [arrow.from.at, arrow.to.at]),
         )
         .fold(1.0, f64::max);
-    let row_y = |index: usize| -(index as f64) * 1.2;
+    let mut spans_after = vec![Vec::new(); diagram.signals.len()];
+    let mut bottom_spans = Vec::new();
+    for (index, span) in diagram.spans.iter().enumerate() {
+        if let Some(signal_index) = span_anchor_index(diagram, span) {
+            spans_after[signal_index].push(index);
+        } else {
+            bottom_spans.push(index);
+        }
+    }
+    let mut signal_y = Vec::with_capacity(diagram.signals.len());
+    let mut cursor = 0.0;
+    for local_spans in &spans_after {
+        signal_y.push(-cursor);
+        cursor += 1.2 + local_spans.len() as f64 * 0.65;
+    }
+    let row_y = |index: usize| signal_y[index];
     let level_y = |index: usize, value: LogicValue| {
         row_y(index)
             + match value {
@@ -796,6 +868,13 @@ pub fn render_tikz(diagram: &Diagram) -> Result<String, TimingError> {
             escape_latex(title)
         )
         .unwrap();
+    }
+
+    for (group, start, end) in signal_group_runs(diagram) {
+        let top = row_y(start) + 0.45;
+        let bottom = row_y(end) - 0.45;
+        writeln!(output, "  \\draw (-1.05,{top:.3}) -- (-1.25,{top:.3}) -- (-1.25,{bottom:.3}) -- (-1.05,{bottom:.3}) node[midway,left,rotate=90] {{{}}};",
+            escape_latex(group)).unwrap();
     }
 
     for (index, signal) in diagram.signals.iter().enumerate() {
@@ -861,7 +940,7 @@ pub fn render_tikz(diagram: &Diagram) -> Result<String, TimingError> {
     }
 
     let chart_top = 0.48;
-    let chart_bottom = row_y(diagram.signals.len().saturating_sub(1)) - 0.48;
+    let chart_bottom = -cursor + 0.72;
     for marker in &diagram.markers {
         writeln!(output, "  \\draw[dashed,gray] ({:.3},{chart_top:.3}) -- ({:.3},{chart_bottom:.3}) node[above] {{{}}};",
             marker.at, marker.at, escape_latex(marker.label.as_deref().unwrap_or("标记"))).unwrap();
@@ -881,7 +960,27 @@ pub fn render_tikz(diagram: &Diagram) -> Result<String, TimingError> {
         writeln!(output, "  \\draw[->] ({:.3},{:.3}) -- ({:.3},{:.3}) node[midway,above,fill=white,inner sep=1pt] {{{label}}};",
             arrow.from.at, row_y(from_index), arrow.to.at, row_y(to_index)).unwrap();
     }
-    for (index, span) in diagram.spans.iter().enumerate() {
+    for (signal_index, span_indices) in spans_after.iter().enumerate() {
+        for (local_index, span_index) in span_indices.iter().enumerate() {
+            let span = &diagram.spans[*span_index];
+            let y = row_y(signal_index) - 0.68 - local_index as f64 * 0.55;
+            let style = match span.kind {
+                SpanKind::Interval => "<->",
+                SpanKind::Setup => "<->,densely dashed",
+                SpanKind::Hold => "<->,dotted",
+            };
+            writeln!(
+                output,
+                "  \\draw[{style}] ({:.3},{y:.3}) -- ({:.3},{y:.3}) node[midway,below] {{{}}};",
+                span.from,
+                span.to,
+                escape_latex(&span.label)
+            )
+            .unwrap();
+        }
+    }
+    for (index, span_index) in bottom_spans.iter().enumerate() {
+        let span = &diagram.spans[*span_index];
         let y = chart_bottom - 0.65 - index as f64 * 0.55;
         let style = match span.kind {
             SpanKind::Interval => "<->",
@@ -897,10 +996,14 @@ pub fn render_tikz(diagram: &Diagram) -> Result<String, TimingError> {
         )
         .unwrap();
     }
+    let unit_y = if bottom_spans.is_empty() {
+        chart_bottom - 0.2
+    } else {
+        chart_bottom - 0.95 - (bottom_spans.len() - 1) as f64 * 0.55
+    };
     writeln!(
         output,
-        "  \\node[anchor=east,font=\\scriptsize] at ({max_time:.3},{:.3}) {{{}}};",
-        chart_bottom - 0.2,
+        "  \\node[anchor=east,font=\\scriptsize] at ({max_time:.3},{unit_y:.3}) {{{}}};",
         escape_latex(&diagram.unit)
     )
     .unwrap();
@@ -928,6 +1031,40 @@ fn escape_latex(value: &str) -> String {
     escaped
 }
 
+fn span_anchor_index(diagram: &Diagram, span: &Span) -> Option<usize> {
+    match &span.under {
+        Some(SpanTarget::Signal { signal: name }) => diagram
+            .signals
+            .iter()
+            .position(|signal| signal.name == *name),
+        Some(SpanTarget::Group { group: name }) => diagram
+            .signals
+            .iter()
+            .rposition(|signal| signal.group.as_deref() == Some(name.as_str())),
+        None => None,
+    }
+}
+
+fn signal_group_runs(diagram: &Diagram) -> Vec<(&str, usize, usize)> {
+    let mut runs = Vec::new();
+    let mut index = 0;
+    while index < diagram.signals.len() {
+        let Some(group) = diagram.signals[index].group.as_deref() else {
+            index += 1;
+            continue;
+        };
+        let start = index;
+        while index + 1 < diagram.signals.len()
+            && diagram.signals[index + 1].group.as_deref() == Some(group)
+        {
+            index += 1;
+        }
+        runs.push((group, start, index));
+        index += 1;
+    }
+    runs
+}
+
 pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String, TimingError> {
     validate(diagram)?;
     let max_time = diagram
@@ -943,17 +1080,35 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
                 .flat_map(|arrow| [arrow.from.at, arrow.to.at]),
         )
         .fold(1.0, f64::max);
-    let label_width = 190.0;
+    let group_runs = signal_group_runs(diagram);
+    let label_width = if group_runs.is_empty() { 190.0 } else { 230.0 };
     let chart_width = 900.0;
     let row_height = 58.0;
+    let local_span_height = 38.0;
     let top = if diagram.title.is_some() { 78.0 } else { 42.0 };
-    let bottom = if diagram.spans.is_empty() {
+    let mut spans_after = vec![Vec::new(); diagram.signals.len()];
+    let mut bottom_spans = Vec::new();
+    for (index, span) in diagram.spans.iter().enumerate() {
+        if let Some(signal_index) = span_anchor_index(diagram, span) {
+            spans_after[signal_index].push(index);
+        } else {
+            bottom_spans.push(index);
+        }
+    }
+    let mut signal_y = Vec::with_capacity(diagram.signals.len());
+    let mut cursor = top;
+    for local_spans in &spans_after {
+        signal_y.push(cursor);
+        cursor += row_height + local_spans.len() as f64 * local_span_height;
+    }
+    let wave_bottom = cursor;
+    let bottom = if bottom_spans.is_empty() {
         40.0
     } else {
-        68.0 + diagram.spans.len() as f64 * 24.0
+        68.0 + bottom_spans.len() as f64 * 24.0
     };
     let width = label_width + chart_width + 24.0;
-    let height = top + diagram.signals.len() as f64 * row_height + bottom;
+    let height = wave_bottom + bottom;
     let x = |time: f64| label_width + (time / max_time) * chart_width;
 
     let mut svg = String::new();
@@ -968,15 +1123,23 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
     for tick in 0..=tick_count {
         let time = max_time * tick as f64 / tick_count.max(1) as f64;
         let tx = x(time);
-        write!(svg, r##"<line x1="{tx:.2}" y1="{top:.2}" x2="{tx:.2}" y2="{:.2}" stroke="#dedede" stroke-width="0.8"/>"##, height - bottom).unwrap();
+        write!(svg, r##"<line x1="{tx:.2}" y1="{top:.2}" x2="{tx:.2}" y2="{wave_bottom:.2}" stroke="#dedede" stroke-width="0.8"/>"##).unwrap();
     }
-    for row in 0..=diagram.signals.len() {
-        let gy = top + row as f64 * row_height;
+    for y in &signal_y {
+        let gy = *y;
         write!(svg, r##"<line x1="{label_width:.2}" y1="{gy:.2}" x2="{:.2}" y2="{gy:.2}" stroke="#e3e3e3" stroke-width="0.8"/>"##, label_width + chart_width).unwrap();
+    }
+    write!(svg, r##"<line x1="{label_width:.2}" y1="{wave_bottom:.2}" x2="{:.2}" y2="{wave_bottom:.2}" stroke="#e3e3e3" stroke-width="0.8"/>"##, label_width + chart_width).unwrap();
+
+    for (group, start, end) in group_runs {
+        let y1 = signal_y[start] + 8.0;
+        let y2 = signal_y[end] + row_height - 8.0;
+        let center = (y1 + y2) / 2.0;
+        write!(svg, r##"<g data-signal-group="{}"><path d="M 72 {y1:.2} H 62 V {y2:.2} H 72" fill="none" stroke="#111" stroke-width="1.2"/><text x="26" y="{center:.2}" transform="rotate(-90 26 {center:.2})" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="13" text-anchor="middle">{}</text></g>"##, escape(group), escape(group)).unwrap();
     }
 
     for (index, item) in diagram.signals.iter().enumerate() {
-        let y = top + index as f64 * row_height;
+        let y = signal_y[index];
         write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="17" text-anchor="end">{}</text>"##, label_width - 18.0, y + 36.0, escape(&item.name)).unwrap();
         match &item.kind {
             SignalKind::Clock {
@@ -1004,7 +1167,7 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
 
     for mark in &diagram.markers {
         let mx = x(mark.at);
-        write!(svg, r##"<line x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{:.2}" stroke="#555" stroke-width="1.2" stroke-dasharray="4 4"/>"##, top - 8.0, height - bottom).unwrap();
+        write!(svg, r##"<line x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{wave_bottom:.2}" stroke="#555" stroke-width="1.2" stroke-dasharray="4 4"/>"##, top - 8.0).unwrap();
         if let Some(label) = &mark.label {
             write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#333" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12">{}</text>"##,
                 mx + 5.0, top - 10.0, escape(label)).unwrap();
@@ -1023,23 +1186,38 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
             .expect("causal arrow target was validated");
         let from_x = x(arrow.from.at);
         let to_x = x(arrow.to.at);
-        let from_y = top + from_index as f64 * row_height + 31.0;
-        let to_y = top + to_index as f64 * row_height + 31.0;
+        let from_y = signal_y[from_index] + 31.0;
+        let to_y = signal_y[to_index] + 31.0;
         write!(svg, r##"<path data-annotation="causal-arrow" d="M {from_x:.2} {from_y:.2} L {to_x:.2} {to_y:.2}" fill="none" stroke="#111" stroke-width="1.4" marker-end="url(#cause-arrow)"/>"##).unwrap();
         if let Some(label) = &arrow.label {
             write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12" text-anchor="middle">{}</text>"##,
                 (from_x + to_x) / 2.0, (from_y + to_y) / 2.0 - 7.0, render_math_label(label)).unwrap();
         }
     }
-    for (index, span) in diagram.spans.iter().enumerate() {
-        let sy = height - bottom + 30.0 + index as f64 * 24.0;
+    let mut draw_span = |span: &Span, sy: f64, placement: &str| {
         let (annotation, dash) = match span.kind {
             SpanKind::Interval => ("span", ""),
             SpanKind::Setup => ("setup", r#" stroke-dasharray="5 3""#),
             SpanKind::Hold => ("hold", r#" stroke-dasharray="2 3""#),
         };
-        write!(svg, r##"<line data-annotation="{annotation}" x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2"{dash} marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
-            x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 22.0, render_math_label(&span.label)).unwrap();
+        write!(svg, r##"<line data-annotation="{annotation}" data-span-under="{}" x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2"{dash} marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
+            escape(placement), x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 20.0, render_math_label(&span.label)).unwrap();
+    };
+    for (signal_index, span_indices) in spans_after.iter().enumerate() {
+        for (local_index, span_index) in span_indices.iter().enumerate() {
+            let span = &diagram.spans[*span_index];
+            let placement = match span.under.as_ref().expect("anchored span") {
+                SpanTarget::Signal { signal } => format!("signal:{signal}"),
+                SpanTarget::Group { group } => format!("group:{group}"),
+            };
+            let sy =
+                signal_y[signal_index] + row_height + 8.0 + local_index as f64 * local_span_height;
+            draw_span(span, sy, &placement);
+        }
+    }
+    for (index, span_index) in bottom_spans.iter().enumerate() {
+        let sy = wave_bottom + 30.0 + index as f64 * 24.0;
+        draw_span(&diagram.spans[*span_index], sy, "diagram");
     }
     write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#555" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
     Ok(svg)
@@ -1514,5 +1692,41 @@ arrow REQ@2 -> ACK@4 "响应"
         assert!(one_svg.contains("viewBox=\"0 0 1114 192\""));
         assert!(three_svg.contains("viewBox=\"0 0 1114 240\""));
         assert_eq!(three_svg.matches("data-annotation=").count(), 3);
+    }
+
+    #[test]
+    fn renders_each_contiguous_signal_group_with_a_bracket() {
+        let diagram = parse(
+            "clock SCLK cycles 4 group SPI\nsignal CS_N high@0 low@1 group SPI\nsignal READY low@0 high@2\nbus DATA A@0..2 group SPI\n",
+        )
+        .unwrap();
+        let svg = render_svg(&diagram, &RenderOptions::default()).unwrap();
+
+        assert!(svg.contains("viewBox=\"0 0 1154"));
+        assert_eq!(svg.matches("data-signal-group=\"SPI\"").count(), 2);
+        assert_eq!(svg.matches(">SPI</text>").count(), 2);
+    }
+
+    #[test]
+    fn places_span_annotations_under_a_signal_or_group() {
+        let source = "signal REQ low@0 high@2 group CTRL\nsignal ACK low@0 high@4 group CTRL\nhold 1..2 \"信号保持\" under signal REQ\nsetup 2..3 \"组建立\" under group CTRL\nspan 3..4 \"图底区间\"\n";
+        let diagram = parse(source).expect("anchored spans should parse");
+
+        let dsl = to_dsl(&diagram).unwrap();
+        assert!(dsl.contains("hold 1..2 \"信号保持\" under signal \"REQ\""));
+        assert!(dsl.contains("setup 2..3 \"组建立\" under group \"CTRL\""));
+
+        let yaml = to_yaml(&diagram).unwrap();
+        assert!(yaml.contains("signal: REQ"));
+        assert!(yaml.contains("group: CTRL"));
+        assert!(!yaml.contains("!signal"));
+        let yaml_diagram = parse(&yaml).expect("YAML span targets should round trip");
+        assert_eq!(yaml_diagram.spans[0].under, diagram.spans[0].under);
+        assert_eq!(yaml_diagram.spans[1].under, diagram.spans[1].under);
+
+        let svg = render_svg(&diagram, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("data-span-under=\"signal:REQ\""));
+        assert!(svg.contains("data-span-under=\"group:CTRL\""));
+        assert!(svg.contains("data-span-under=\"diagram\""));
     }
 }
