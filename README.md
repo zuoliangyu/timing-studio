@@ -8,7 +8,8 @@ Timing Studio 是一个运行在浏览器中的数字时序图编辑器。Rust �
 - 实时 SVG 预览
 - 时间标记和信号分组
 - 浅色、深色主题
-- 导入 YAML/JSON，导出 SVG
+- 40%～200% 波形预览缩放与适应窗口
+- 导入 YAML/JSON，导出 SVG 和 2 倍分辨率 PNG
 - 浏览器本地保存最近一次编辑
 - PWA 离线缓存和 GitHub Pages 发布
 
@@ -54,4 +55,3 @@ React 工作台 -> timing-wasm -> timing-core -> SVG
 ```
 
 `timing-core` 不依赖浏览器环境，可以在未来复用于 CLI 或 Tauri，但当前版本只交付 Web/PWA。
-
