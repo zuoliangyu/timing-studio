@@ -1,4 +1,14 @@
 export const examples = {
+  "固定闸门计数": `timing 1
+title "固定闸门硬件边沿计数逻辑时序"
+unit ms
+clock "输入脉冲" period 2 cycles 8 start 0
+signal "100 ms 闸门" low@0 high@2 low@14
+signal "计数使能" low@0 high@2 low@14
+signal "锁存事件" low@0 high@14 low@15
+signal "结果有效" low@0 high@15
+span 2..14 "固定闸门时间 T_g"
+`,
   "简洁 DSL": `timing 1
 title "SPI Flash 读取"
 unit cycle

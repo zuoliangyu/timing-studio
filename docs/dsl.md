@@ -151,7 +151,7 @@ mark "第一次传输" @6.5
 
 ```text
 document  := statement*
-statement := timing | title | unit | clock | signal | bus | mark
+statement := timing | title | unit | clock | signal | bus | mark | span
 timing    := "timing" "1"
 title     := "title" text
 unit      := "unit" token
@@ -159,6 +159,7 @@ clock     := "clock" name clock-option+
 signal    := "signal" name point+ ["group" name]
 bus       := "bus" name segment+ ["group" name]
 mark      := "mark" text marker-time
+span      := "span" time ".." time text
 point     := logic-at-time
 segment   := text-at-range
 marker-time  := "@" time
@@ -167,6 +168,22 @@ text-at-range := text "@" time ".." time
 ```
 
 这里的 `text` 或 `name` 如果包含空白，必须使用双引号。
+
+## `span`
+
+```text
+span <开始>..<结束> <标签>
+```
+
+在所有信号下方绘制双向区间箭头，适合标注固定窗口、建立保持时间或有效区间。结束时间必须大于非负的开始时间，标签包含空格时必须使用双引号。
+
+```text
+span 2..14 "固定闸门时间 T_g"
+```
+
+## DSL 与 YAML 转换
+
+编辑器中的 `DSL` / `YAML` 控件通过 Rust `Diagram` 模型进行双向转换。转换保证标题、单位、信号、标记和区间标注的语义等价，但不会保留源文件注释、空行、字段顺序或手工排版。
 
 ## 格式识别
 

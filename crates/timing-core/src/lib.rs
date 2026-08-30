@@ -13,6 +13,8 @@ pub struct Diagram {
     pub signals: Vec<Signal>,
     #[serde(default)]
     pub markers: Vec<Marker>,
+    #[serde(default)]
+    pub spans: Vec<Span>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +73,13 @@ pub struct Marker {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Span {
+    pub from: f64,
+    pub to: f64,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderOptions {
@@ -105,6 +114,103 @@ pub fn parse(source: &str) -> Result<Diagram, TimingError> {
     Ok(diagram)
 }
 
+pub fn to_yaml(diagram: &Diagram) -> Result<String, TimingError> {
+    validate(diagram)?;
+    serde_yaml::to_string(diagram).map_err(|error| TimingError::Parse(error.to_string()))
+}
+
+pub fn to_dsl(diagram: &Diagram) -> Result<String, TimingError> {
+    validate(diagram)?;
+    let mut output = String::from("timing 1\n");
+    if let Some(title) = &diagram.title {
+        writeln!(output, "title {}", quote_dsl(title)).unwrap();
+    }
+    writeln!(output, "unit {}", quote_dsl(&diagram.unit)).unwrap();
+    if diagram.title.is_some() {
+        output.push('\n');
+    }
+    for signal in &diagram.signals {
+        match &signal.kind {
+            SignalKind::Clock {
+                period,
+                cycles,
+                start,
+            } => {
+                write!(
+                    output,
+                    "clock {} period {} cycles {} start {}",
+                    quote_dsl(&signal.name),
+                    format_number(*period),
+                    cycles,
+                    format_number(*start)
+                )
+                .unwrap();
+            }
+            SignalKind::Digital { points } => {
+                write!(output, "signal {}", quote_dsl(&signal.name)).unwrap();
+                for point in points {
+                    let value = match point.value {
+                        LogicValue::Low => "low",
+                        LogicValue::High => "high",
+                        LogicValue::X => "x",
+                        LogicValue::Z => "z",
+                    };
+                    write!(output, " {value}@{}", format_number(point.at)).unwrap();
+                }
+            }
+            SignalKind::Bus { segments } => {
+                write!(output, "bus {}", quote_dsl(&signal.name)).unwrap();
+                for segment in segments {
+                    write!(
+                        output,
+                        " {}@{}..{}",
+                        quote_dsl(&segment.value),
+                        format_number(segment.from),
+                        format_number(segment.to)
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        if let Some(group) = &signal.group {
+            write!(output, " group {}", quote_dsl(group)).unwrap();
+        }
+        output.push('\n');
+    }
+    for marker in &diagram.markers {
+        writeln!(
+            output,
+            "mark {} @{}",
+            quote_dsl(marker.label.as_deref().unwrap_or("标记")),
+            format_number(marker.at)
+        )
+        .unwrap();
+    }
+    for span in &diagram.spans {
+        writeln!(
+            output,
+            "span {}..{} {}",
+            format_number(span.from),
+            format_number(span.to),
+            quote_dsl(&span.label)
+        )
+        .unwrap();
+    }
+    Ok(output)
+}
+
+fn quote_dsl(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn format_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
 fn is_dsl(source: &str) -> bool {
     for raw_line in source.lines() {
         let line = raw_line.trim();
@@ -114,7 +220,7 @@ fn is_dsl(source: &str) -> bool {
         let keyword = line.split_whitespace().next().unwrap_or_default();
         if matches!(
             keyword,
-            "timing" | "title" | "unit" | "clock" | "signal" | "bus" | "mark"
+            "timing" | "title" | "unit" | "clock" | "signal" | "bus" | "mark" | "span"
         ) {
             return true;
         }
@@ -150,6 +256,7 @@ fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
         unit: default_unit(),
         signals: Vec::new(),
         markers: Vec::new(),
+        spans: Vec::new(),
     };
     let mut version_declared = false;
     let mut unit_declared = false;
@@ -197,6 +304,7 @@ fn parse_dsl(source: &str) -> Result<Diagram, TimingError> {
             "signal" => diagram.signals.push(parse_digital(&tokens, line_number)?),
             "bus" => diagram.signals.push(parse_bus(&tokens, line_number)?),
             "mark" => diagram.markers.push(parse_marker(&tokens, line_number)?),
+            "span" => diagram.spans.push(parse_span(&tokens, line_number)?),
             keyword => return Err(dsl_error(line_number, &format!("未知语句 `{keyword}`"))),
         }
     }
@@ -382,6 +490,19 @@ fn parse_marker(tokens: &[String], line: usize) -> Result<Marker, TimingError> {
     })
 }
 
+fn parse_span(tokens: &[String], line: usize) -> Result<Span, TimingError> {
+    reject_extra(tokens, 3, line, "span")?;
+    let range = required(tokens, 1, line, "区间范围")?;
+    let (from, to) = range
+        .split_once("..")
+        .ok_or_else(|| dsl_error(line, "区间范围应写成 2..14"))?;
+    Ok(Span {
+        from: parse_number(from, line, "区间开始时间")?,
+        to: parse_number(to, line, "区间结束时间")?,
+        label: required(tokens, 2, line, "区间标签")?.to_owned(),
+    })
+}
+
 fn reject_extra(
     tokens: &[String],
     expected: usize,
@@ -498,60 +619,60 @@ fn validate(diagram: &Diagram) -> Result<(), TimingError> {
     {
         return Err(TimingError::Invalid("标记时间必须是有限的非负数".into()));
     }
+    if diagram.spans.iter().any(|span| {
+        !span.from.is_finite()
+            || !span.to.is_finite()
+            || span.from < 0.0
+            || span.to <= span.from
+            || span.label.trim().is_empty()
+    }) {
+        return Err(TimingError::Invalid(
+            "区间标注必须有标签，且结束时间必须大于非负的开始时间".into(),
+        ));
+    }
     Ok(())
 }
 
-pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, TimingError> {
+pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String, TimingError> {
     validate(diagram)?;
     let max_time = diagram
         .signals
         .iter()
         .map(signal_end)
         .chain(diagram.markers.iter().map(|m| m.at))
+        .chain(diagram.spans.iter().map(|span| span.to))
         .fold(1.0, f64::max);
-    let label_width = 154.0;
-    let chart_width = 920.0;
-    let row_height = 64.0;
-    let top = if diagram.title.is_some() { 82.0 } else { 48.0 };
-    let bottom = 50.0;
-    let width = label_width + chart_width + 30.0;
+    let label_width = 190.0;
+    let chart_width = 900.0;
+    let row_height = 58.0;
+    let top = if diagram.title.is_some() { 78.0 } else { 42.0 };
+    let bottom = if diagram.spans.is_empty() { 40.0 } else { 92.0 };
+    let width = label_width + chart_width + 24.0;
     let height = top + diagram.signals.len() as f64 * row_height + bottom;
     let x = |time: f64| label_width + (time / max_time) * chart_width;
-    let (bg, panel, grid, text, muted, signal, bus, marker) = if options.dark {
-        (
-            "#101517", "#151c1f", "#314044", "#e9f1f2", "#849397", "#52d6c9", "#81aef4", "#f0b65b",
-        )
-    } else {
-        (
-            "#f1f3f2", "#ffffff", "#d5dcda", "#172124", "#667477", "#087f78", "#326fbe", "#b66714",
-        )
-    };
 
     let mut svg = String::new();
-    write!(svg, r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{}"><rect width="100%" height="100%" fill="{bg}"/><rect x="18" y="18" width="{:.0}" height="{:.0}" rx="6" fill="{panel}"/>"#,
-        escape(diagram.title.as_deref().unwrap_or("时序图")), width - 36.0, height - 36.0).unwrap();
+    write!(svg, r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{}"><defs><marker id="span-arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto-start-reverse"><path d="M 0 0 L 7 3.5 L 0 7" fill="none" stroke="#111" stroke-width="1"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>"##,
+        escape(diagram.title.as_deref().unwrap_or("时序图"))).unwrap();
 
     if let Some(title) = &diagram.title {
-        write!(svg, r#"<text x="34" y="50" fill="{text}" font-family="system-ui,sans-serif" font-size="20" font-weight="650">{}</text>"#, escape(title)).unwrap();
+        write!(svg, r##"<text x="{:.0}" y="40" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="19" font-weight="600">{}</text>"##, label_width, escape(title)).unwrap();
     }
 
-    let tick_count = max_time.ceil().min(40.0) as usize;
+    let tick_count = max_time.ceil().clamp(1.0, 40.0) as usize;
     for tick in 0..=tick_count {
         let time = max_time * tick as f64 / tick_count.max(1) as f64;
         let tx = x(time);
-        write!(svg, r#"<line x1="{tx:.2}" y1="{:.2}" x2="{tx:.2}" y2="{:.2}" stroke="{grid}" stroke-width="1"/><text x="{tx:.2}" y="{:.2}" fill="{muted}" font-family="ui-monospace,monospace" font-size="11" text-anchor="middle">{time:.1}</text>"#,
-            top - 12.0, height - bottom + 4.0, top - 20.0).unwrap();
+        write!(svg, r##"<line x1="{tx:.2}" y1="{top:.2}" x2="{tx:.2}" y2="{:.2}" stroke="#dedede" stroke-width="0.8"/>"##, height - bottom).unwrap();
+    }
+    for row in 0..=diagram.signals.len() {
+        let gy = top + row as f64 * row_height;
+        write!(svg, r##"<line x1="{label_width:.2}" y1="{gy:.2}" x2="{:.2}" y2="{gy:.2}" stroke="#e3e3e3" stroke-width="0.8"/>"##, label_width + chart_width).unwrap();
     }
 
     for (index, item) in diagram.signals.iter().enumerate() {
         let y = top + index as f64 * row_height;
-        if index > 0 {
-            write!(svg, r#"<line x1="34" y1="{:.2}" x2="{:.2}" y2="{:.2}" stroke="{grid}" stroke-width="1"/>"#, y, width - 34.0, y).unwrap();
-        }
-        write!(svg, r#"<text x="136" y="{:.2}" fill="{text}" font-family="ui-monospace,monospace" font-size="13" font-weight="600" text-anchor="end">{}</text>"#, y + 35.0, escape(&item.name)).unwrap();
-        if let Some(group) = &item.group {
-            write!(svg, r#"<text x="34" y="{:.2}" fill="{muted}" font-family="system-ui,sans-serif" font-size="10">{}</text>"#, y + 16.0, escape(group)).unwrap();
-        }
+        write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="17" text-anchor="end">{}</text>"##, label_width - 18.0, y + 36.0, escape(&item.name)).unwrap();
         match &item.kind {
             SignalKind::Clock {
                 period,
@@ -565,24 +686,31 @@ pub fn render_svg(diagram: &Diagram, options: &RenderOptions) -> Result<String, 
                     let level = if step % 2 == 0 { y + 19.0 } else { y + 43.0 };
                     write!(path, " V {level:.2} H {nx:.2}").unwrap();
                 }
-                write!(svg, r#"<path d="{path}" fill="none" stroke="{signal}" stroke-width="2.2" stroke-linejoin="round"/>"#).unwrap();
+                write!(svg, r##"<path d="{path}" fill="none" stroke="#111" stroke-width="2" stroke-linejoin="miter"/>"##).unwrap();
             }
             SignalKind::Digital { points } => {
-                render_digital(&mut svg, points, y, &x, signal, muted)
+                render_digital(&mut svg, points, y, max_time, &x, "#111", "#555")
             }
-            SignalKind::Bus { segments } => render_bus(&mut svg, segments, y, &x, bus, panel, text),
+            SignalKind::Bus { segments } => {
+                render_bus(&mut svg, segments, y, &x, "#111", "#fff", "#111")
+            }
         }
     }
 
     for mark in &diagram.markers {
         let mx = x(mark.at);
-        write!(svg, r#"<line x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{:.2}" stroke="{marker}" stroke-width="1.5" stroke-dasharray="4 4"/>"#, top - 12.0, height - bottom).unwrap();
+        write!(svg, r##"<line x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{:.2}" stroke="#555" stroke-width="1.2" stroke-dasharray="4 4"/>"##, top - 8.0, height - bottom).unwrap();
         if let Some(label) = &mark.label {
-            write!(svg, r##"<rect x="{:.2}" y="{:.2}" width="{}" height="20" rx="3" fill="{marker}"/><text x="{:.2}" y="{:.2}" fill="#111718" font-family="system-ui,sans-serif" font-size="10" font-weight="700">{}</text>"##,
-                mx + 5.0, top - 8.0, label.chars().count() * 7 + 12, mx + 11.0, top + 6.0, escape(label)).unwrap();
+            write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#333" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="12">{}</text>"##,
+                mx + 5.0, top - 10.0, escape(label)).unwrap();
         }
     }
-    write!(svg, r#"<text x="{:.2}" y="{:.2}" fill="{muted}" font-family="ui-monospace,monospace" font-size="11" text-anchor="end">{}</text></svg>"#, width - 34.0, height - 26.0, escape(&diagram.unit)).unwrap();
+    for (index, span) in diagram.spans.iter().enumerate() {
+        let sy = height - bottom + 30.0 + index as f64 * 24.0;
+        write!(svg, r##"<line x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2" marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
+            x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 22.0, escape(&span.label)).unwrap();
+    }
+    write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#555" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
     Ok(svg)
 }
 
@@ -602,6 +730,7 @@ fn render_digital(
     svg: &mut String,
     points: &[DigitalPoint],
     y: f64,
+    max_time: f64,
     x: &impl Fn(f64) -> f64,
     signal: &str,
     muted: &str,
@@ -615,6 +744,9 @@ fn render_digital(
     for pair in points.windows(2) {
         let nx = x(pair[1].at);
         write!(path, " H {nx:.2} V {:.2}", level(pair[1].value)).unwrap();
+    }
+    if points.last().is_some() {
+        write!(path, " H {:.2}", x(max_time)).unwrap();
     }
     write!(svg, r#"<path d="{path}" fill="none" stroke="{signal}" stroke-width="2.2" stroke-linejoin="round"/>"#).unwrap();
     for point in points
@@ -863,5 +995,41 @@ signal READY low@0 high@1
                     .contains(&format!("`{statement}` 语句包含多余内容"))
             );
         }
+    }
+
+    #[test]
+    fn converts_dsl_and_yaml_without_changing_the_diagram() {
+        let source = r#"timing 1
+title "固定闸门硬件边沿计数逻辑时序"
+unit ms
+clock "输入脉冲" period 2 cycles 8 start 0
+signal "100 ms 闸门" low@0 high@2 low@14
+signal "计数使能" low@0 high@2 low@14
+signal "锁存事件" low@0 high@14 low@15
+signal "结果有效" low@0 high@15
+span 2..14 "固定闸门时间 T_g"
+"#;
+        let original = parse(source).expect("gate example should parse");
+        let yaml = to_yaml(&original).expect("diagram should serialize to YAML");
+        let from_yaml = parse(&yaml).expect("serialized YAML should parse");
+        let dsl = to_dsl(&from_yaml).expect("diagram should serialize to DSL");
+        let round_trip = parse(&dsl).expect("serialized DSL should parse");
+
+        assert_eq!(
+            serde_json::to_value(original).unwrap(),
+            serde_json::to_value(round_trip).unwrap()
+        );
+        assert!(dsl.contains("span 2..14 \"固定闸门时间 T_g\""));
+    }
+
+    #[test]
+    fn renders_paper_style_grid_and_span_annotation() {
+        let diagram = parse("signal A low@0 high@2 low@4\nspan 1..3 \"有效窗口\"\n").unwrap();
+        let svg = render_svg(&diagram, &RenderOptions::default()).unwrap();
+
+        assert!(svg.contains("fill=\"#fff\""));
+        assert!(svg.contains("stroke=\"#111\""));
+        assert!(svg.contains("marker-start=\"url(#span-arrow)\""));
+        assert!(svg.contains("有效窗口"));
     }
 }
