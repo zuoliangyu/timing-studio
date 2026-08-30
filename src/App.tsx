@@ -2,9 +2,12 @@ import {
   AlignLeft, ArrowDown, ArrowDownUp, ArrowLeft, ArrowRight, ArrowUp, Blocks, Bus, Check, ChevronDown,
   CircleHelp, Clock3, Copy, Download, FileCode2, FileDown, FileText, FileUp, GripVertical,
   Highlighter, ImageDown, Layers3, Maximize2, MoveRight, Plus, Radio, Redo2, RotateCcw,
-  Rows3, Search, Timer, Trash2, Undo2, Zap, ZoomIn, ZoomOut,
+  Rows3, Search, Timer, Trash2, Undo2, X, Zap, ZoomIn, ZoomOut,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback, useEffect, useMemo, useRef, useState,
+  type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent,
+} from "react";
 import initWasm, { convert, inspect, render, tikz } from "./wasm/timing_wasm";
 import { examples } from "./examples";
 
@@ -483,7 +486,7 @@ function App() {
         <div className="paper-stage">
           {!ready && <div className="empty-state">正在加载渲染核心</div>}
           {ready && error && !validating && <div className="empty-state error-state">修正左侧描述后，这里会立即更新。</div>}
-          {ready && !error && svg && <div className={`paper-sheet ${validating ? "is-validating" : ""}`} style={{ width: `${zoom}%` }} dangerouslySetInnerHTML={{ __html: svg }} />}
+          {ready && !error && svg && diagram && <InteractivePaper svg={svg} zoom={zoom} diagram={diagram} validating={validating} mutate={mutateDiagram} onSignalRenamed={(previous, next) => setSelectedSignal((current) => current === previous ? next : current)} />}
           {ready && validating && <div className="validation-state" role="status" aria-live="polite">正在校验</div>}
         </div>
       </section>
@@ -492,6 +495,338 @@ function App() {
 }
 
 type MutateDiagram = (mutate: (draft: Diagram) => void) => boolean;
+
+type PreviewEditKind = "title" | "unit" | "signal" | "group" | "bus" | "marker" | "span" | "arrow";
+type PreviewTextEdit = {
+  kind: PreviewEditKind;
+  label: string;
+  value: string;
+  left: number;
+  top: number;
+  index?: number;
+  signalIndex?: number;
+  segmentIndex?: number;
+  key?: string;
+};
+type PreviewDragKind = "marker" | "span-start" | "span-end" | "span-move";
+type SvgTimeline = { left: number; width: number; maxTime: number };
+type PreviewDrag = {
+  kind: PreviewDragKind;
+  index: number;
+  startTime: number;
+  from: number;
+  to: number;
+  currentFrom: number;
+  currentTo: number;
+  moved: boolean;
+  group: SVGGElement;
+  svg: SVGSVGElement;
+  timeline: SvgTimeline;
+};
+
+function InteractivePaper({ svg, zoom, diagram, validating, mutate, onSignalRenamed }: {
+  svg: string;
+  zoom: number;
+  diagram: Diagram;
+  validating: boolean;
+  mutate: MutateDiagram;
+  onSignalRenamed: (previous: string, next: string) => void;
+}) {
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const dragReadoutRef = useRef<HTMLOutputElement>(null);
+  const dragRef = useRef<PreviewDrag | null>(null);
+  const [textEdit, setTextEdit] = useState<PreviewTextEdit | null>(null);
+
+  useEffect(() => {
+    dragRef.current = null;
+    if (dragReadoutRef.current) dragReadoutRef.current.hidden = true;
+    setTextEdit(null);
+  }, [svg]);
+
+  const openTextEditor = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const stackedTarget = document.elementsFromPoint(event.clientX, event.clientY)
+      .map((element) => element.closest("[data-edit-kind]") as SVGElement | null)
+      .find((element): element is SVGElement => Boolean(element));
+    const eventElement = event.target instanceof Element ? event.target : null;
+    const target = stackedTarget ?? eventElement?.closest("[data-edit-kind]") as SVGElement | null;
+    const marker = !target ? eventElement?.closest("[data-marker-index]") as SVGElement | null : null;
+    const arrow = !target && !marker ? eventElement?.closest("[data-arrow-index]") as SVGElement | null : null;
+    const sheet = sheetRef.current;
+    if ((!target && !marker && !arrow) || !sheet) return;
+    const kind = (target?.dataset.editKind ?? (marker ? "marker" : "arrow")) as PreviewEditKind;
+    const index = target ? readDataIndex(target, "editIndex") : marker ? readDataIndex(marker, "markerIndex") : readDataIndex(arrow, "arrowIndex");
+    const signalIndex = readDataIndex(target, "signalIndex");
+    const segmentIndex = readDataIndex(target, "segmentIndex");
+    const key = target?.dataset.editKey;
+    const details = previewEditDetails(kind, diagram, { index, signalIndex, segmentIndex, key });
+    if (!details) return;
+    const width = 252;
+    const position = fitPreviewOverlay(sheet, event.clientX, event.clientY + 10, width, 78);
+    setTextEdit({
+      kind,
+      ...details,
+      index,
+      signalIndex,
+      segmentIndex,
+      key,
+      left: position.left,
+      top: position.top,
+    });
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const commitTextEdit = (edit: PreviewTextEdit, nextValue: string) => {
+    const next = nextValue.trim();
+    if ((edit.kind === "unit" || edit.kind === "signal" || edit.kind === "group" || edit.kind === "span") && !next) return false;
+    if (edit.kind === "signal" && diagram.signals.some((signal, index) => index !== edit.index && signal.name === next)) return false;
+    const previousSignal = edit.kind === "signal" && edit.index !== undefined ? diagram.signals[edit.index]?.name : undefined;
+    const changed = mutate((draft) => {
+      if (edit.kind === "title") draft.title = next || undefined;
+      if (edit.kind === "unit") draft.unit = next;
+      if (edit.kind === "signal" && edit.index !== undefined) {
+        const signal = draft.signals[edit.index];
+        const previous = signal.name;
+        signal.name = next;
+        for (const arrow of draft.arrows) {
+          if (arrow.from.signal === previous) arrow.from.signal = next;
+          if (arrow.to.signal === previous) arrow.to.signal = next;
+        }
+        for (const span of draft.spans) {
+          if (span.under && "signal" in span.under && span.under.signal === previous) span.under.signal = next;
+        }
+      }
+      if (edit.kind === "group" && edit.key) {
+        for (const signal of draft.signals) if (signal.group === edit.key) signal.group = next;
+        for (const span of draft.spans) {
+          if (span.under && "group" in span.under && span.under.group === edit.key) span.under.group = next;
+        }
+      }
+      if (edit.kind === "bus" && edit.signalIndex !== undefined && edit.segmentIndex !== undefined) {
+        draft.signals[edit.signalIndex].bus!.segments[edit.segmentIndex].value = nextValue;
+      }
+      if (edit.kind === "marker" && edit.index !== undefined) draft.markers[edit.index].label = next || undefined;
+      if (edit.kind === "span" && edit.index !== undefined) draft.spans[edit.index].label = next;
+      if (edit.kind === "arrow" && edit.index !== undefined) draft.arrows[edit.index].label = next || undefined;
+    });
+    if (changed && previousSignal && previousSignal !== next) onSignalRenamed(previousSignal, next);
+    return changed;
+  };
+
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !(event.target instanceof Element)) return;
+    const dragTarget = event.target.closest("[data-drag-kind]") as SVGElement | null;
+    const root = dragTarget?.closest("svg") as SVGSVGElement | null;
+    if (!dragTarget || !root) return;
+    const kind = dragTarget.dataset.dragKind as PreviewDragKind;
+    const group = (kind === "marker" ? dragTarget.closest("[data-marker-index]") : dragTarget.closest("[data-span-index]")) as SVGGElement | null;
+    const index = readDataIndex(group, kind === "marker" ? "markerIndex" : "spanIndex");
+    const timeline = readTimeline(root);
+    const startTime = timeline ? pointerTime(event.clientX, event.clientY, root, timeline) : null;
+    if (!group || index === undefined || !timeline || startTime === null) return;
+    const span = diagram.spans[index];
+    const from = kind === "marker" ? diagram.markers[index]?.at : span?.from;
+    const to = kind === "marker" ? from : span?.to;
+    if (from === undefined || to === undefined) return;
+    dragRef.current = { kind, index, startTime, from, to, currentFrom: from, currentTo: to, moved: false, group, svg: root, timeline };
+    group.classList.add("is-dragging");
+    setTextEdit(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const raw = pointerTime(event.clientX, event.clientY, drag.svg, drag.timeline);
+    if (raw === null) return;
+    const minDuration = 0.1;
+    if (drag.kind === "marker") {
+      drag.currentFrom = snapPreviewTime(raw, diagram, drag.timeline);
+      drag.currentTo = drag.currentFrom;
+      const dx = timelineX(drag.currentFrom, drag.timeline) - timelineX(drag.from, drag.timeline);
+      drag.group.setAttribute("transform", `translate(${dx.toFixed(2)} 0)`);
+    } else if (drag.kind === "span-start") {
+      drag.currentFrom = Math.min(snapPreviewTime(raw, diagram, drag.timeline), drag.to - minDuration);
+      drag.currentTo = drag.to;
+      updateSpanPreview(drag.group, drag.currentFrom, drag.currentTo, drag.timeline);
+    } else if (drag.kind === "span-end") {
+      drag.currentFrom = drag.from;
+      drag.currentTo = Math.max(snapPreviewTime(raw, diagram, drag.timeline), drag.from + minDuration);
+      updateSpanPreview(drag.group, drag.currentFrom, drag.currentTo, drag.timeline);
+    } else {
+      const delta = roundTime(raw - drag.startTime);
+      const boundedDelta = Math.max(delta, -drag.from);
+      drag.currentFrom = roundTime(drag.from + boundedDelta);
+      drag.currentTo = roundTime(drag.to + boundedDelta);
+      updateSpanPreview(drag.group, drag.currentFrom, drag.currentTo, drag.timeline);
+    }
+    drag.moved = Math.abs(drag.currentFrom - drag.from) > 0.0001 || Math.abs(drag.currentTo - drag.to) > 0.0001;
+    const sheet = sheetRef.current;
+    const readout = dragReadoutRef.current;
+    if (sheet && readout) {
+      const position = fitPreviewOverlay(sheet, event.clientX + 12, event.clientY - 34, 170, 36);
+      readout.hidden = false;
+      readout.style.left = `${position.left}px`;
+      readout.style.top = `${position.top}px`;
+      readout.value = drag.kind === "marker"
+        ? `${diagram.markers[drag.index]?.label ?? "标记"} · ${formatTime(drag.currentFrom)} ${diagram.unit}`
+        : `${formatTime(drag.currentFrom)} .. ${formatTime(drag.currentTo)} ${diagram.unit}`;
+    }
+    event.preventDefault();
+  };
+
+  const finishDrag = (event: ReactPointerEvent<HTMLDivElement>, commit: boolean) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    drag.group.classList.remove("is-dragging");
+    dragRef.current = null;
+    if (dragReadoutRef.current) dragReadoutRef.current.hidden = true;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (commit && drag.moved) {
+      const changed = mutate((draft) => {
+        if (drag.kind === "marker") draft.markers[drag.index].at = drag.currentFrom;
+        else {
+          draft.spans[drag.index].from = drag.currentFrom;
+          draft.spans[drag.index].to = drag.currentTo;
+        }
+      });
+      if (changed) return;
+    }
+    resetPreviewDrag(drag);
+  };
+
+  return <div ref={sheetRef} className={`paper-sheet ${validating ? "is-validating" : ""}`} style={{ width: `${zoom}%` }}>
+    <div className="paper-svg" onDoubleClick={openTextEditor} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={(event) => finishDrag(event, true)} onPointerCancel={(event) => finishDrag(event, false)} dangerouslySetInnerHTML={{ __html: svg }} />
+    {textEdit && <PreviewTextEditor key={`${textEdit.kind}-${textEdit.index ?? textEdit.key ?? "root"}`} edit={textEdit} onCommit={(value) => commitTextEdit(textEdit, value)} onClose={() => setTextEdit(null)} />}
+    <output ref={dragReadoutRef} className="preview-drag-readout" hidden />
+  </div>;
+}
+
+function PreviewTextEditor({ edit, onCommit, onClose }: { edit: PreviewTextEdit; onCommit: (value: string) => boolean; onClose: () => void }) {
+  const [value, setValue] = useState(edit.value);
+  const [invalid, setInvalid] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { inputRef.current?.focus(); inputRef.current?.select(); }, []);
+  const submit = () => {
+    if (value === edit.value) { onClose(); return; }
+    if (onCommit(value)) onClose(); else setInvalid(true);
+  };
+  return <form className={`preview-text-editor ${invalid ? "is-invalid" : ""}`} style={{ left: edit.left, top: edit.top }} aria-label={`编辑${edit.label}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
+    <label><span>{edit.label}</span><input ref={inputRef} aria-label={`编辑${edit.label}`} value={value} onChange={(event) => { setValue(event.target.value); setInvalid(false); }} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} /></label>
+    <button type="submit" title="确认修改"><Check size={14} /></button>
+    <button type="button" title="取消修改" onClick={onClose}><X size={14} /></button>
+    {invalid && <small>内容为空、重复或无效</small>}
+  </form>;
+}
+
+function previewEditDetails(kind: PreviewEditKind, diagram: Diagram, target: { index?: number; signalIndex?: number; segmentIndex?: number; key?: string }): { label: string; value: string } | null {
+  if (kind === "title") return { label: "图表标题", value: diagram.title ?? "" };
+  if (kind === "unit") return { label: "时间单位", value: diagram.unit };
+  if (kind === "signal" && target.index !== undefined) return { label: "信号名称", value: diagram.signals[target.index]?.name ?? "" };
+  if (kind === "group" && target.key !== undefined) return { label: "分组名称", value: target.key };
+  if (kind === "bus" && target.signalIndex !== undefined && target.segmentIndex !== undefined) return { label: "总线数据", value: diagram.signals[target.signalIndex]?.bus?.segments[target.segmentIndex]?.value ?? "" };
+  if (kind === "marker" && target.index !== undefined) return { label: "标记标签", value: diagram.markers[target.index]?.label ?? "" };
+  if (kind === "span" && target.index !== undefined) return { label: "区间标签", value: diagram.spans[target.index]?.label ?? "" };
+  if (kind === "arrow" && target.index !== undefined) return { label: "箭头标签", value: diagram.arrows[target.index]?.label ?? "" };
+  return null;
+}
+
+function fitPreviewOverlay(sheet: HTMLElement, clientX: number, clientY: number, width: number, height: number) {
+  const sheetBounds = sheet.getBoundingClientRect();
+  const stageBounds = sheet.closest(".paper-stage")?.getBoundingClientRect() ?? sheetBounds;
+  const visibleLeft = Math.max(stageBounds.left, 0);
+  const visibleRight = Math.min(stageBounds.right, window.innerWidth);
+  const visibleTop = Math.max(stageBounds.top, 0);
+  const visibleBottom = Math.min(stageBounds.bottom, window.innerHeight);
+  const minLeft = visibleLeft - sheetBounds.left + 8;
+  const maxLeft = Math.max(minLeft, visibleRight - sheetBounds.left - width - 8);
+  const minTop = visibleTop - sheetBounds.top + 8;
+  const maxTop = Math.max(minTop, visibleBottom - sheetBounds.top - height - 8);
+  return {
+    left: Math.min(Math.max(clientX - sheetBounds.left, minLeft), maxLeft),
+    top: Math.min(Math.max(clientY - sheetBounds.top, minTop), maxTop),
+  };
+}
+
+function readDataIndex(element: SVGElement | null, key: string): number | undefined {
+  const value = element?.dataset[key];
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function readTimeline(svg: SVGSVGElement): SvgTimeline | null {
+  const left = Number(svg.dataset.chartLeft);
+  const width = Number(svg.dataset.chartWidth);
+  const maxTime = Number(svg.dataset.maxTime);
+  return Number.isFinite(left) && width > 0 && maxTime > 0 ? { left, width, maxTime } : null;
+}
+
+function pointerTime(clientX: number, clientY: number, svg: SVGSVGElement, timeline: SvgTimeline): number | null {
+  const matrix = svg.getScreenCTM();
+  if (!matrix) return null;
+  const point = new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse());
+  return ((point.x - timeline.left) / timeline.width) * timeline.maxTime;
+}
+
+function timelineX(time: number, timeline: SvgTimeline) {
+  return timeline.left + (time / timeline.maxTime) * timeline.width;
+}
+
+function roundTime(value: number) {
+  return Number((Math.round(value * 10) / 10).toFixed(3));
+}
+
+function snapPreviewTime(value: number, diagram: Diagram, timeline: SvgTimeline) {
+  const bounded = Math.max(0, value);
+  const threshold = timeline.maxTime * 12 / timeline.width;
+  let result = Math.max(0, roundTime(bounded));
+  let distance = threshold;
+  for (const time of previewEventTimes(diagram)) {
+    const nextDistance = Math.abs(time - bounded);
+    if (nextDistance <= distance) {
+      result = time;
+      distance = nextDistance;
+    }
+  }
+  return Number(result.toFixed(3));
+}
+
+function previewEventTimes(diagram: Diagram) {
+  const times = new Set<number>([0]);
+  for (const signal of diagram.signals) {
+    if (signal.clock) for (let step = 0; step <= signal.clock.cycles * 2; step += 1) times.add(signal.clock.start + step * signal.clock.period / 2);
+    if (signal.digital) for (const point of signal.digital.points) times.add(point.at);
+    if (signal.bus) for (const segment of signal.bus.segments) { times.add(segment.from); times.add(segment.to); }
+  }
+  for (const marker of diagram.markers) times.add(marker.at);
+  for (const span of diagram.spans) { times.add(span.from); times.add(span.to); }
+  for (const arrow of diagram.arrows) { times.add(arrow.from.at); times.add(arrow.to.at); }
+  return times;
+}
+
+function updateSpanPreview(group: SVGGElement, from: number, to: number, timeline: SvgTimeline) {
+  const fromX = timelineX(from, timeline).toFixed(2);
+  const toX = timelineX(to, timeline).toFixed(2);
+  for (const selector of [".preview-span-line", ".preview-hit"]) {
+    const line = group.querySelector<SVGLineElement>(selector);
+    line?.setAttribute("x1", fromX);
+    line?.setAttribute("x2", toX);
+  }
+  group.querySelectorAll<SVGCircleElement>(".preview-span-start").forEach((element) => element.setAttribute("cx", fromX));
+  group.querySelectorAll<SVGCircleElement>(".preview-span-end").forEach((element) => element.setAttribute("cx", toX));
+  group.querySelector<SVGTextElement>("[data-edit-kind='span']")?.setAttribute("x", ((Number(fromX) + Number(toX)) / 2).toFixed(2));
+}
+
+function resetPreviewDrag(drag: PreviewDrag) {
+  if (drag.kind === "marker") drag.group.removeAttribute("transform");
+  else updateSpanPreview(drag.group, drag.from, drag.to, drag.timeline);
+}
+
+function formatTime(value: number) {
+  return String(Number(value.toFixed(3)));
+}
 
 function MiniWave({ kind }: { kind: "clock" | "pulse" | "negative-pulse" | "low" | "high" | "bus" }) {
   return <span className={`mini-wave ${kind}`} aria-hidden="true"><i /><i /><i /><i /></span>;

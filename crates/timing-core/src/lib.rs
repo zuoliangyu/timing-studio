@@ -1112,11 +1112,11 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
     let x = |time: f64| label_width + (time / max_time) * chart_width;
 
     let mut svg = String::new();
-    write!(svg, r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{}" shape-rendering="geometricPrecision" text-rendering="geometricPrecision"><defs><marker id="span-arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto-start-reverse"><path d="M 0 0 L 7 3.5 L 0 7" fill="none" stroke="#111" stroke-width="1"/></marker><marker id="cause-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#111"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>"##,
+    write!(svg, r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0} {height:.0}" role="img" aria-label="{}" data-chart-left="{label_width:.2}" data-chart-width="{chart_width:.2}" data-max-time="{max_time:.6}" shape-rendering="geometricPrecision" text-rendering="geometricPrecision"><defs><marker id="span-arrow" markerWidth="7" markerHeight="7" refX="3.5" refY="3.5" orient="auto-start-reverse"><path d="M 0 0 L 7 3.5 L 0 7" fill="none" stroke="#111" stroke-width="1"/></marker><marker id="cause-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 Z" fill="#111"/></marker></defs><rect width="100%" height="100%" fill="#fff"/>"##,
         escape(diagram.title.as_deref().unwrap_or("时序图"))).unwrap();
 
     if let Some(title) = &diagram.title {
-        write!(svg, r##"<text x="{:.0}" y="40" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="19" font-weight="600">{}</text>"##, label_width, escape(title)).unwrap();
+        write!(svg, r##"<text data-edit-kind="title" x="{:.0}" y="40" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="19" font-weight="600">{}</text>"##, label_width, escape(title)).unwrap();
     }
 
     let tick_count = max_time.ceil().clamp(1.0, 40.0) as usize;
@@ -1135,12 +1135,12 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
         let y1 = signal_y[start] + 8.0;
         let y2 = signal_y[end] + row_height - 8.0;
         let center = (y1 + y2) / 2.0;
-        write!(svg, r##"<g data-signal-group="{}"><path d="M 72 {y1:.2} H 62 V {y2:.2} H 72" fill="none" stroke="#111" stroke-width="1.2"/><text x="26" y="{center:.2}" transform="rotate(-90 26 {center:.2})" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="13" text-anchor="middle">{}</text></g>"##, escape(group), escape(group)).unwrap();
+        write!(svg, r##"<g data-signal-group="{}"><path d="M 72 {y1:.2} H 62 V {y2:.2} H 72" fill="none" stroke="#111" stroke-width="1.2"/><text data-edit-kind="group" data-edit-key="{}" x="26" y="{center:.2}" transform="rotate(-90 26 {center:.2})" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="13" text-anchor="middle">{}</text></g>"##, escape(group), escape(group), escape(group)).unwrap();
     }
 
     for (index, item) in diagram.signals.iter().enumerate() {
         let y = signal_y[index];
-        write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="17" text-anchor="end">{}</text>"##, label_width - 18.0, y + 36.0, escape(&item.name)).unwrap();
+        write!(svg, r##"<text data-edit-kind="signal" data-edit-index="{index}" x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="17" text-anchor="end">{}</text>"##, label_width - 18.0, y + 36.0, escape(&item.name)).unwrap();
         match &item.kind {
             SignalKind::Clock {
                 period,
@@ -1160,20 +1160,21 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
                 render_digital(&mut svg, points, y, max_time, &x, "#111", "#555")
             }
             SignalKind::Bus { segments } => {
-                render_bus(&mut svg, segments, y, &x, "#111", "#fff", "#111")
+                render_bus(&mut svg, segments, index, y, &x, "#111", "#fff", "#111")
             }
         }
     }
 
-    for mark in &diagram.markers {
+    for (index, mark) in diagram.markers.iter().enumerate() {
         let mx = x(mark.at);
-        write!(svg, r##"<line x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{wave_bottom:.2}" stroke="#555" stroke-width="1.2" stroke-dasharray="4 4"/>"##, top - 8.0).unwrap();
+        write!(svg, r##"<g class="preview-marker" data-drag-kind="marker" data-marker-index="{index}"><line class="preview-marker-line" x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{wave_bottom:.2}" stroke="#555" stroke-width="1.2" stroke-dasharray="4 4"/><line class="preview-hit" x1="{mx:.2}" y1="{:.2}" x2="{mx:.2}" y2="{wave_bottom:.2}" stroke="transparent" stroke-width="20"/>"##, top - 8.0, top - 8.0).unwrap();
         if let Some(label) = &mark.label {
-            write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#333" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12">{}</text>"##,
+            write!(svg, r##"<text data-edit-kind="marker" data-edit-index="{index}" x="{:.2}" y="{:.2}" fill="#333" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12">{}</text>"##,
                 mx + 5.0, top - 10.0, escape(label)).unwrap();
         }
+        svg.push_str("</g>");
     }
-    for arrow in &diagram.arrows {
+    for (index, arrow) in diagram.arrows.iter().enumerate() {
         let from_index = diagram
             .signals
             .iter()
@@ -1188,20 +1189,22 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
         let to_x = x(arrow.to.at);
         let from_y = signal_y[from_index] + 31.0;
         let to_y = signal_y[to_index] + 31.0;
-        write!(svg, r##"<path data-annotation="causal-arrow" d="M {from_x:.2} {from_y:.2} L {to_x:.2} {to_y:.2}" fill="none" stroke="#111" stroke-width="1.4" marker-end="url(#cause-arrow)"/>"##).unwrap();
+        write!(svg, r##"<path data-annotation="causal-arrow" data-arrow-index="{index}" d="M {from_x:.2} {from_y:.2} L {to_x:.2} {to_y:.2}" fill="none" stroke="#111" stroke-width="1.4" marker-end="url(#cause-arrow)"/><path class="preview-arrow-hit" data-arrow-index="{index}" d="M {from_x:.2} {from_y:.2} L {to_x:.2} {to_y:.2}" fill="none" stroke="transparent" stroke-width="20"/>"##).unwrap();
         if let Some(label) = &arrow.label {
-            write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12" text-anchor="middle">{}</text>"##,
+            write!(svg, r##"<text data-edit-kind="arrow" data-edit-index="{index}" x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="12" text-anchor="middle">{}</text>"##,
                 (from_x + to_x) / 2.0, (from_y + to_y) / 2.0 - 7.0, render_math_label(label)).unwrap();
         }
     }
-    let mut draw_span = |span: &Span, sy: f64, placement: &str| {
+    let mut draw_span = |span_index: usize, span: &Span, sy: f64, placement: &str| {
         let (annotation, dash) = match span.kind {
             SpanKind::Interval => ("span", ""),
             SpanKind::Setup => ("setup", r#" stroke-dasharray="5 3""#),
             SpanKind::Hold => ("hold", r#" stroke-dasharray="2 3""#),
         };
-        write!(svg, r##"<line data-annotation="{annotation}" data-span-under="{}" x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2"{dash} marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
-            escape(placement), x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 20.0, render_math_label(&span.label)).unwrap();
+        let from_x = x(span.from);
+        let to_x = x(span.to);
+        write!(svg, r##"<g class="preview-span" data-span-index="{span_index}"><line class="preview-span-line" data-annotation="{annotation}" data-span-under="{}" x1="{from_x:.2}" y1="{sy:.2}" x2="{to_x:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2"{dash} marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><line class="preview-hit" data-drag-kind="span-move" x1="{from_x:.2}" y1="{sy:.2}" x2="{to_x:.2}" y2="{sy:.2}" stroke="transparent" stroke-width="20"/><circle class="preview-endpoint-hit preview-span-start" data-drag-kind="span-start" cx="{from_x:.2}" cy="{sy:.2}" r="12" fill="transparent"/><circle class="preview-endpoint-hit preview-span-end" data-drag-kind="span-end" cx="{to_x:.2}" cy="{sy:.2}" r="12" fill="transparent"/><circle class="preview-handle preview-span-start" cx="{from_x:.2}" cy="{sy:.2}" r="5.5" fill="#fff" stroke="#087f78" stroke-width="1.5" opacity="0" pointer-events="none"/><circle class="preview-handle preview-span-end" cx="{to_x:.2}" cy="{sy:.2}" r="5.5" fill="#fff" stroke="#087f78" stroke-width="1.5" opacity="0" pointer-events="none"/><text data-edit-kind="span" data-edit-index="{span_index}" x="{:.2}" y="{:.2}" fill="#111" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="16" text-anchor="middle">{}</text></g>"##,
+            escape(placement), (from_x + to_x) / 2.0, sy + 20.0, render_math_label(&span.label)).unwrap();
     };
     for (signal_index, span_indices) in spans_after.iter().enumerate() {
         for (local_index, span_index) in span_indices.iter().enumerate() {
@@ -1212,14 +1215,14 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
             };
             let sy =
                 signal_y[signal_index] + row_height + 8.0 + local_index as f64 * local_span_height;
-            draw_span(span, sy, &placement);
+            draw_span(*span_index, span, sy, &placement);
         }
     }
     for (index, span_index) in bottom_spans.iter().enumerate() {
         let sy = wave_bottom + 30.0 + index as f64 * 24.0;
-        draw_span(&diagram.spans[*span_index], sy, "diagram");
+        draw_span(*span_index, &diagram.spans[*span_index], sy, "diagram");
     }
-    write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#555" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
+    write!(svg, r##"<text data-edit-kind="unit" x="{:.2}" y="{:.2}" fill="#555" font-family="'Times New Roman','Noto Serif CJK SC','Source Han Serif SC',SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
     Ok(svg)
 }
 
@@ -1274,13 +1277,14 @@ fn render_digital(
 fn render_bus(
     svg: &mut String,
     segments: &[BusSegment],
+    signal_index: usize,
     y: f64,
     x: &impl Fn(f64) -> f64,
     bus: &str,
     panel: &str,
     text: &str,
 ) {
-    for segment in segments {
+    for (segment_index, segment) in segments.iter().enumerate() {
         let left = x(segment.from);
         let right = x(segment.to);
         let path = format!(
@@ -1294,7 +1298,7 @@ fn render_bus(
             y + 42.0,
             left + 7.0,
         );
-        write!(svg, r#"<path d="{path}" fill="{panel}" stroke="{bus}" stroke-width="2"/><text x="{:.2}" y="{:.2}" fill="{text}" font-family="'Cascadia Mono',Consolas,'Courier New',SimSun,monospace" font-size="12" text-anchor="middle">{}</text>"#, (left + right) / 2.0, y + 35.0, escape(&segment.value)).unwrap();
+        write!(svg, r#"<path d="{path}" fill="{panel}" stroke="{bus}" stroke-width="2"/><text data-edit-kind="bus" data-signal-index="{signal_index}" data-segment-index="{segment_index}" x="{:.2}" y="{:.2}" fill="{text}" font-family="'Cascadia Mono',Consolas,'Courier New',SimSun,monospace" font-size="12" text-anchor="middle">{}</text>"#, (left + right) / 2.0, y + 35.0, escape(&segment.value)).unwrap();
     }
 }
 
@@ -1581,6 +1585,33 @@ span 2..14 "固定闸门时间 T_g"
         assert!(svg.contains("stroke=\"#111\""));
         assert!(svg.contains("marker-start=\"url(#span-arrow)\""));
         assert!(svg.contains("有效窗口"));
+    }
+
+    #[test]
+    fn renders_preview_editing_metadata_without_changing_paper_output() {
+        let source = r#"title "交互预览"
+unit ns
+signal REQ low@0 high@2 group CTRL
+bus DATA A@0..2 B@2..4 group CTRL
+mark "采样" @1
+hold 1..3 "保持时间"
+arrow REQ@2 -> DATA@3 "响应"
+"#;
+        let diagram = parse(source).unwrap();
+        let svg = render_svg(&diagram, &RenderOptions::default()).unwrap();
+
+        assert!(svg.contains("data-chart-left="));
+        assert!(svg.contains("data-max-time="));
+        assert!(svg.contains("data-edit-kind=\"title\""));
+        assert!(svg.contains("data-edit-kind=\"signal\" data-edit-index=\"0\""));
+        assert!(svg.contains("data-edit-kind=\"group\" data-edit-key=\"CTRL\""));
+        assert!(svg.contains("data-edit-kind=\"bus\" data-signal-index=\"1\""));
+        assert!(svg.contains("data-drag-kind=\"marker\" data-marker-index=\"0\""));
+        assert!(svg.contains("data-drag-kind=\"span-start\""));
+        assert!(svg.contains("data-drag-kind=\"span-end\""));
+        assert!(svg.contains("data-edit-kind=\"span\" data-edit-index=\"0\""));
+        assert!(svg.contains("data-edit-kind=\"arrow\" data-edit-index=\"0\""));
+        assert!(svg.contains("class=\"preview-arrow-hit\" data-arrow-index=\"0\""));
     }
 
     #[test]

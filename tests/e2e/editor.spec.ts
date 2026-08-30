@@ -75,6 +75,86 @@ test("DSL 与 YAML 可以保持当前模式插入并格式化", async ({ page })
   await expect(page.getByRole("button", { name: "分组操作" })).toBeVisible();
 });
 
+test("预览区可以双击编辑文字并拖动标记与区间", async ({ page }) => {
+  await page.goto("/");
+  const source = page.getByRole("textbox", { name: "DSL 时序描述" });
+  await source.fill([
+    "timing 1",
+    'title "直接编辑"',
+    "unit ns",
+    "signal REQ low@0 high@2 group CTRL",
+    "signal ACK low@0 high@4 group CTRL",
+    "bus DATA A@0..2 B@2..4",
+    'mark "采样" @1',
+    'hold 1..2 "保持时间"',
+    'arrow REQ@2 -> ACK@3 "响应"',
+  ].join("\n"));
+  await expect(page.getByText("DSL 有效 · 积木与波形已同步")).toBeVisible();
+
+  await page.locator('svg [data-edit-kind="title"]').dblclick({ force: true });
+  const titleEditor = page.getByRole("textbox", { name: "编辑图表标题" });
+  await titleEditor.fill("直接编辑后的图");
+  await titleEditor.press("Enter");
+  await expect(page.getByRole("img", { name: "直接编辑后的图" })).toBeVisible();
+
+  await page.locator('svg [data-edit-kind="signal"][data-edit-index="0"]').dblclick({ force: true });
+  const signalEditor = page.getByRole("textbox", { name: "编辑信号名称" });
+  await signalEditor.fill("REQUEST");
+  await signalEditor.press("Enter");
+  await expect(source).toContainText('arrow "REQUEST"@2 -> "ACK"@3 "响应"');
+
+  await page.locator('svg [data-edit-kind="bus"][data-segment-index="0"]').dblclick({ force: true });
+  const busEditor = page.getByRole("textbox", { name: "编辑总线数据" });
+  await busEditor.fill("ADDR");
+  await busEditor.press("Enter");
+  await expect(source).toContainText('bus "DATA" "ADDR"@0..2');
+
+  await page.locator('svg [data-edit-kind="span"]').dblclick({ force: true });
+  const spanEditor = page.getByRole("textbox", { name: "编辑区间标签" });
+  await spanEditor.fill("保持窗口 T_hold");
+  await spanEditor.press("Enter");
+  await expect(source).toContainText('hold 1..2 "保持窗口 T_hold"');
+
+  const dragToTime = async (selector: string, targetTime: number) => {
+    await expect(page.locator(".paper-sheet")).not.toHaveClass(/is-validating/);
+    const part = page.locator(selector);
+    const point = await part.evaluate((element, time) => {
+      const root = element.ownerSVGElement!;
+      const partBounds = element.getBoundingClientRect();
+      const chartLeft = Number(root.dataset.chartLeft);
+      const chartWidth = Number(root.dataset.chartWidth);
+      const maxTime = Number(root.dataset.maxTime);
+      const targetSvgX = chartLeft + time / maxTime * chartWidth;
+      const matrix = root.getScreenCTM()!;
+      const target = new DOMPoint(targetSvgX, 0).matrixTransform(matrix);
+      return {
+        startX: partBounds.left + partBounds.width / 2,
+        startY: partBounds.top + partBounds.height / 2,
+        targetX: target.x,
+      };
+    }, targetTime);
+    await page.mouse.move(point.startX, point.startY);
+    await page.mouse.down();
+    await page.mouse.move(point.targetX, point.startY, { steps: 8 });
+    await page.mouse.up();
+    await expect(page.getByText("DSL 有效 · 积木与波形已同步")).toBeVisible();
+  };
+
+  await dragToTime('svg [data-marker-index="0"] .preview-hit', 3);
+  await expect(source).toContainText('mark "采样" @3');
+
+  await dragToTime('svg [data-span-index="0"] [data-drag-kind="span-end"]', 3);
+  await expect(source).toContainText('hold 1..3 "保持窗口 T_hold"');
+
+  await dragToTime('svg [data-span-index="0"] .preview-hit', 3);
+  await expect(source).toContainText('hold 2..4 "保持窗口 T_hold"');
+  await page.getByRole("button", { name: "撤销" }).click();
+  await expect(source).toContainText('hold 1..3 "保持窗口 T_hold"');
+
+  await dragToTime('svg [data-span-index="0"] .preview-hit', 1);
+  await expect(source).toContainText('hold 0..2 "保持窗口 T_hold"');
+});
+
 test("大量信号可以筛选并切换紧凑视图", async ({ page }) => {
   await page.goto("/");
   const signals = Array.from({ length: 60 }, (_, index) => `signal SIG_${index} low@0 high@${index + 1}`);
