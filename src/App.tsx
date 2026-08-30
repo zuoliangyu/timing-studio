@@ -1,7 +1,7 @@
 import {
   ArrowDown, ArrowUp, Blocks, Bus, Check, ChevronDown, Clock3, Copy, Download,
-  FileUp, Highlighter, ImageDown, Maximize2, Plus, Radio, RotateCcw, Trash2,
-  Zap, ZoomIn, ZoomOut,
+  FileDown, FileUp, Highlighter, ImageDown, Maximize2, Plus, Radio, Redo2,
+  RotateCcw, Trash2, Undo2, Zap, ZoomIn, ZoomOut,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import initWasm, { convert, inspect, render } from "./wasm/timing_wasm";
@@ -9,6 +9,7 @@ import { examples } from "./examples";
 
 type SourceFormat = "dsl" | "yaml";
 type EditorMode = "blocks" | SourceFormat;
+type HistoryEntry = { source: string; format: SourceFormat; mode: EditorMode };
 type Signal = {
   name: string;
   group?: string;
@@ -42,9 +43,12 @@ function App() {
   const [selectedSignal, setSelectedSignal] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [exportingPng, setExportingPng] = useState(false);
+  const [past, setPast] = useState<HistoryEntry[]>([]);
+  const [future, setFuture] = useState<HistoryEntry[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
+  const textEditStartRef = useRef<HistoryEntry | null>(null);
 
   const errorLine = useMemo(() => {
     if (!error) return null;
@@ -78,11 +82,42 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [source, ready]);
 
-  const applySource = (nextSource: string, nextFormat = format) => {
+  const remember = (entry: HistoryEntry) => {
+    setPast((items) => [...items.slice(-49), entry]);
+    setFuture([]);
+  };
+
+  const applySource = (nextSource: string, nextFormat = format, record = true) => {
+    if (nextSource === source && nextFormat === format) return;
+    if (record) remember({ source, format, mode: editorMode });
     setError(null);
     setValidating(true);
     setSource(nextSource);
     setFormat(nextFormat);
+  };
+
+  const restoreHistory = (entry: HistoryEntry) => {
+    setError(null);
+    setEditError(null);
+    setSource(entry.source);
+    setFormat(entry.format);
+    setEditorMode(entry.mode);
+  };
+
+  const undo = () => {
+    const entry = past.at(-1);
+    if (!entry) return;
+    setPast((items) => items.slice(0, -1));
+    setFuture((items) => [{ source, format, mode: editorMode }, ...items].slice(0, 50));
+    restoreHistory(entry);
+  };
+
+  const redo = () => {
+    const [entry, ...rest] = future;
+    if (!entry) return;
+    setFuture(rest);
+    setPast((items) => [...items.slice(-49), { source, format, mode: editorMode }]);
+    restoreHistory(entry);
   };
 
   const changeFormat = (nextFormat: SourceFormat) => {
@@ -156,6 +191,11 @@ function App() {
     if (svg) downloadBlob(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }), "timing-diagram.svg");
   }, [svg]);
 
+  const downloadSource = () => downloadBlob(
+    new Blob([source], { type: format === "dsl" ? "text/plain;charset=utf-8" : "text/yaml;charset=utf-8" }),
+    `timing-diagram.${format === "dsl" ? "timing" : "yaml"}`,
+  );
+
   const downloadPng = useCallback(async () => {
     if (!svg || exportingPng) return;
     setExportingPng(true);
@@ -212,6 +252,9 @@ function App() {
           const file = event.target.files?.[0];
           if (file) loadExample(await file.text());
         }} />
+        <button className="icon-control" title={`下载当前 ${format.toUpperCase()} 源文件`} onClick={downloadSource}><FileDown size={17} /></button>
+        <button className="icon-control" title="撤销" disabled={past.length === 0} onClick={undo}><Undo2 size={17} /></button>
+        <button className="icon-control" title="重做" disabled={future.length === 0} onClick={redo}><Redo2 size={17} /></button>
         <button className="icon-control" title="导出 2 倍 PNG" disabled={!svg || Boolean(error) || validating} onClick={downloadPng}><ImageDown size={17} /></button>
         <button className="primary-control" disabled={!svg || Boolean(error) || validating} onClick={downloadSvg}><Download size={16} />导出 SVG</button>
       </div>
@@ -242,7 +285,11 @@ function App() {
         {editorMode === "blocks" && diagram ? <BlockEditor diagram={diagram} selected={selectedSignal} onSelect={setSelectedSignal} mutate={mutateDiagram} removeSignal={removeSignal} duplicateSignal={duplicateSignal} moveSignal={moveSignal} editError={editError} /> : <>
           <div className="editor-wrap">
             <div ref={lineNumbersRef} className="line-numbers" aria-hidden="true">{source.split("\n").map((_, index) => <span className={errorLine === index + 1 ? "line-error" : ""} key={index}>{index + 1}</span>)}</div>
-            <textarea ref={editorRef} value={source} onChange={(event) => applySource(event.target.value)} onScroll={(event) => {
+            <textarea ref={editorRef} value={source} onFocus={() => { textEditStartRef.current = { source, format, mode: editorMode }; }} onBlur={() => {
+              const start = textEditStartRef.current;
+              if (start && (start.source !== source || start.format !== format)) remember(start);
+              textEditStartRef.current = null;
+            }} onChange={(event) => applySource(event.target.value, format, false)} onScroll={(event) => {
               if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = event.currentTarget.scrollTop;
             }} spellCheck={false} aria-label={`${format.toUpperCase()} 时序描述`} />
           </div>
@@ -284,6 +331,17 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
   moveSignal: (index: number, direction: number) => boolean;
   editError: string | null;
 }) {
+  const invalidSignal = editError?.match(/第\s*(\d+)\s*个信号/)?.[1];
+  const invalidIndex = invalidSignal ? Number(invalidSignal) - 1 : -1;
+  const [dragging, setDragging] = useState<number | null>(null);
+  const dropSignal = (target: number) => {
+    if (dragging === null || dragging === target) return;
+    mutate((draft) => {
+      const [signal] = draft.signals.splice(dragging, 1);
+      draft.signals.splice(target, 0, signal);
+    });
+    setDragging(null);
+  };
   return <div className="block-editor">
     <section className="diagram-fields">
       <label><span>图表标题</span><EditInput value={diagram.title ?? ""} onCommit={(value) => mutate((draft) => { draft.title = value || undefined; })} /></label>
@@ -304,6 +362,11 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
         onMove={(direction) => moveSignal(index, direction)}
         canMoveUp={index > 0}
         canMoveDown={index < diagram.signals.length - 1}
+        validationError={invalidIndex === index ? editError : null}
+        dragging={dragging === index}
+        onDragStart={() => setDragging(index)}
+        onDragEnd={() => setDragging(null)}
+        onDrop={() => dropSignal(index)}
       />)}
     </div>
 
@@ -312,7 +375,7 @@ function BlockEditor({ diagram, selected, onSelect, mutate, removeSignal, duplic
   </div>;
 }
 
-function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDuplicate, onMove, canMoveUp, canMoveDown }: {
+function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDuplicate, onMove, canMoveUp, canMoveDown, validationError, dragging, onDragStart, onDragEnd, onDrop }: {
   signal: Signal;
   index: number;
   active: boolean;
@@ -323,6 +386,11 @@ function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDupli
   onMove: (direction: number) => boolean;
   canMoveUp: boolean;
   canMoveDown: boolean;
+  validationError: string | null;
+  dragging: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDrop: () => void;
 }) {
   const kind = signal.clock ? "clock" : signal.bus ? "bus" : "digital";
   const Icon = signal.clock ? Clock3 : signal.bus ? Bus : Radio;
@@ -336,17 +404,21 @@ function SignalLane({ signal, index, active, onSelect, mutate, onRemove, onDupli
     if (next === "bus") draft.bus = { segments: [{ from: 0, to: 4, value: "VALUE" }] };
   });
 
-  return <article className={`signal-lane ${active ? "active" : ""}`} onClick={onSelect}>
-    <div className={`lane-kind ${kind}`}><Icon size={17} /><span>{index + 1}</span></div>
-    <div className="lane-identity">
+  const errorArea = validationError?.includes("名称") ? "identity"
+    : validationError?.includes("时钟") ? "values"
+      : validationError?.includes("时间") || validationError?.includes("总线") ? "values" : null;
+  return <article className={`signal-lane ${active ? "active" : ""} ${validationError ? "invalid" : ""} ${dragging ? "dragging" : ""}`} onClick={onSelect} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); onDrop(); }}>
+    <div className={`lane-kind ${kind}`} draggable title="拖动排序" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; onDragStart(); }} onDragEnd={onDragEnd}><Icon size={17} /><span>{index + 1}</span></div>
+    <div className={`lane-identity ${errorArea === "identity" ? "field-invalid" : ""}`}>
       <label><span>名称</span><EditInput value={signal.name} onCommit={(value) => update((draft) => { draft.name = value; })} /></label>
       <label><span>分组</span><EditInput value={signal.group ?? ""} placeholder="无分组" onCommit={(value) => update((draft) => { draft.group = value || undefined; })} /></label>
       <label><span>类型</span><select value={kind} onChange={(event) => changeKind(event.target.value)}><option value="clock">时钟</option><option value="digital">数字信号</option><option value="bus">总线</option></select></label>
     </div>
-    <div className="lane-values">
+    <div className={`lane-values ${errorArea === "values" ? "field-invalid" : ""}`}>
       {signal.clock && <ClockFields signal={signal} update={update} />}
       {signal.digital && <DigitalFields signal={signal} update={update} />}
       {signal.bus && <BusFields signal={signal} update={update} />}
+      {validationError && <small className="lane-error">{validationError.replace(/^.*?：/, "")}</small>}
     </div>
     <div className="lane-actions">
       <button title="上移" disabled={!canMoveUp} onClick={(event) => { event.stopPropagation(); onMove(-1); }}><ArrowUp size={14} /></button>

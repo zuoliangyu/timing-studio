@@ -556,11 +556,18 @@ fn validate(diagram: &Diagram) -> Result<(), TimingError> {
         return Err(TimingError::Empty);
     }
 
+    let mut names = std::collections::HashSet::new();
     for (line, signal) in diagram.signals.iter().enumerate() {
         if signal.name.trim().is_empty() {
             return Err(TimingError::InvalidSignal {
                 line: line + 1,
                 message: "名称不能为空".into(),
+            });
+        }
+        if !names.insert(signal.name.as_str()) {
+            return Err(TimingError::InvalidSignal {
+                line: line + 1,
+                message: format!("名称 `{}` 与已有信号重复", signal.name),
             });
         }
         let invalid = |message: &str| TimingError::InvalidSignal {
@@ -708,7 +715,7 @@ pub fn render_svg(diagram: &Diagram, _options: &RenderOptions) -> Result<String,
     for (index, span) in diagram.spans.iter().enumerate() {
         let sy = height - bottom + 30.0 + index as f64 * 24.0;
         write!(svg, r##"<line x1="{:.2}" y1="{sy:.2}" x2="{:.2}" y2="{sy:.2}" stroke="#111" stroke-width="1.2" marker-start="url(#span-arrow)" marker-end="url(#span-arrow)"/><text x="{:.2}" y="{:.2}" fill="#111" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="16" text-anchor="middle">{}</text>"##,
-            x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 22.0, escape(&span.label)).unwrap();
+            x(span.from), x(span.to), (x(span.from) + x(span.to)) / 2.0, sy + 22.0, render_math_label(&span.label)).unwrap();
     }
     write!(svg, r##"<text x="{:.2}" y="{:.2}" fill="#555" font-family="Times New Roman,Noto Serif SC,SimSun,serif" font-size="11" text-anchor="end">{}</text></svg>"##, width - 24.0, height - 12.0, escape(&diagram.unit)).unwrap();
     Ok(svg)
@@ -795,6 +802,47 @@ fn escape(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn render_math_label(value: &str) -> String {
+    let mut output = String::new();
+    let chars: Vec<char> = value.chars().collect();
+    let mut index = 0;
+    let mut plain = String::new();
+    while index < chars.len() {
+        if chars[index] != '_' || index + 1 >= chars.len() {
+            plain.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        output.push_str(&escape(&plain));
+        plain.clear();
+        index += 1;
+        let subscript = if chars[index] == '{' {
+            let start = index + 1;
+            let Some(end_offset) = chars[start..].iter().position(|ch| *ch == '}') else {
+                plain.push('_');
+                plain.push('{');
+                index += 1;
+                continue;
+            };
+            let end = start + end_offset;
+            index = end + 1;
+            chars[start..end].iter().collect::<String>()
+        } else {
+            let value = chars[index].to_string();
+            index += 1;
+            value
+        };
+        write!(
+            output,
+            r#"<tspan font-size="11" baseline-shift="sub">{}</tspan>"#,
+            escape(&subscript)
+        )
+        .unwrap();
+    }
+    output.push_str(&escape(&plain));
+    output
 }
 
 #[cfg(test)]
@@ -1031,5 +1079,32 @@ span 2..14 "固定闸门时间 T_g"
         assert!(svg.contains("stroke=\"#111\""));
         assert!(svg.contains("marker-start=\"url(#span-arrow)\""));
         assert!(svg.contains("有效窗口"));
+    }
+
+    #[test]
+    fn rejects_duplicate_signal_names_for_every_input_format() {
+        let dsl = "signal READY low@0\nsignal READY high@0\n";
+        let yaml = r#"
+signals:
+  - name: READY
+    digital: { points: [{ at: 0, value: low }] }
+  - name: READY
+    digital: { points: [{ at: 0, value: high }] }
+"#;
+
+        for source in [dsl, yaml] {
+            let error = parse(source).expect_err("duplicate names must be rejected");
+            assert!(error.to_string().contains("名称 `READY` 与已有信号重复"));
+        }
+    }
+
+    #[test]
+    fn renders_safe_math_subscripts_in_span_labels() {
+        let diagram = parse("signal A low@0 high@1\nspan 0..1 \"窗口 T_{gate} & T_h\"\n").unwrap();
+        let svg = render_svg(&diagram, &RenderOptions::default()).unwrap();
+
+        assert!(svg.contains("baseline-shift=\"sub\">gate</tspan>"));
+        assert!(svg.contains("baseline-shift=\"sub\">h</tspan>"));
+        assert!(svg.contains("&amp;"));
     }
 }
