@@ -28,6 +28,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .brand strong { font-family: Bahnschrift, "Arial Narrow", sans-serif; font-size: 15px; }
 .brand small { margin-top: 5px; color: var(--muted); font-size: 10px; }
 .topbar-actions { min-width: 0; display: flex; align-items: center; gap: 7px; overflow-x: auto; }
+.topbar-actions:has(.example-menu) { overflow: visible; }
 .icon-control, .text-control, .primary-control { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
 .icon-control { width: 34px; padding: 0; }
 .text-control { padding: 0 10px; }

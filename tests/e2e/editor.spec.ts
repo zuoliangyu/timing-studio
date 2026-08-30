@@ -13,6 +13,16 @@ test("应用通过本地地址启动并完成 WASM 渲染", async ({ page }) => 
   await expect(page.getByRole("img", { name: "固定闸门硬件边沿计数逻辑时序" })).toBeVisible();
 });
 
+test("窄桌面视口可以打开示例菜单", async ({ page }) => {
+  await page.setViewportSize({ width: 920, height: 550 });
+  await page.goto("/");
+  await expect(page.getByText("DSL 有效 · 积木与波形已同步")).toBeVisible();
+
+  await page.getByRole("button", { name: "示例", exact: true }).click();
+  await page.getByRole("menuitem", { name: "简洁 DSL" }).click();
+  await expect(page.getByRole("img", { name: "SPI Flash 读取" })).toBeVisible();
+});
+
 test("积木、YAML 与 DSL 围绕同一张图转换", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByText("DSL 有效 · 积木与波形已同步")).toBeVisible();
