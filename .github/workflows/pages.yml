@@ -36,6 +36,18 @@ jobs:
         with:
           path: dist
 
+      # 同一份产物同步到 Netlify（主站）。Netlify 跑在根路径，用 _redirects 把 GitHub Pages
+      # 的 /timing-studio/ 子路径重写到根下同名文件。
+      - name: 发布到 Netlify
+        run: |
+          rm -rf .netlify-out && mkdir .netlify-out
+          cp -r dist/. .netlify-out/
+          echo '/timing-studio/*  /:splat  200' >> .netlify-out/_redirects
+          npx --yes netlify-cli@26 deploy --prod --no-build --dir=.netlify-out --message "${{ github.sha }}"
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
   deploy:
     environment:
       name: github-pages
